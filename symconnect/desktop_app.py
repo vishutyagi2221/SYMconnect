@@ -120,6 +120,22 @@ class Api:
 
     def trigger_app_update(self, download_url: str) -> None:
         trigger_update(download_url)
+        
+    def open_downloads_folder(self) -> None:
+        import os
+        from pathlib import Path
+        import platform
+        
+        downloads_dir = Path.home() / "Downloads" / "SYMconnectTransfers"
+        if downloads_dir.exists():
+            if platform.system() == "Windows":
+                os.startfile(str(downloads_dir))
+            elif platform.system() == "Darwin":
+                import subprocess
+                subprocess.Popen(["open", str(downloads_dir)])
+            else:
+                import subprocess
+                subprocess.Popen(["xdg-open", str(downloads_dir)])
 
 
 def normalize_server_base(value: str) -> str:

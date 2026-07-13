@@ -564,9 +564,86 @@ function symconnectBootstrap(payload) {
 window.symconnectBootstrap = symconnectBootstrap;
 window.symconnectApplyHostStatus = symconnectApplyHostStatus;
 
+// --- Host UI Elements ---
+const hostChatToggle = document.getElementById("hostChatToggle");
+const hostChatBadge = document.getElementById("hostChatBadge");
+const hostChatPanel = document.getElementById("hostChatPanel");
+const closeHostChat = document.getElementById("closeHostChat");
+const hostChatLog = document.getElementById("hostChatLog");
+
+const hostFileToast = document.getElementById("hostFileToast");
+const hostFileName = document.getElementById("hostFileName");
+const hostFileClose = document.getElementById("hostFileClose");
+const hostFileOpen = document.getElementById("hostFileOpen");
+
+let unreadHostChats = 0;
+
+if (hostChatToggle) {
+  hostChatToggle.addEventListener("click", () => {
+    hostChatPanel.classList.toggle("hidden");
+    if (!hostChatPanel.classList.contains("hidden")) {
+      unreadHostChats = 0;
+      hostChatBadge.classList.add("hidden");
+      hostChatBadge.innerText = "0";
+      hostChatLog.scrollTop = hostChatLog.scrollHeight;
+    }
+  });
+}
+if (closeHostChat) {
+  closeHostChat.addEventListener("click", () => hostChatPanel.classList.add("hidden"));
+}
+if (hostFileClose) {
+  hostFileClose.addEventListener("click", () => hostFileToast.classList.add("hidden"));
+}
+if (hostFileOpen) {
+  hostFileOpen.addEventListener("click", () => {
+    if (window.pywebview && window.pywebview.api) {
+      window.pywebview.api.open_downloads_folder();
+    }
+    hostFileToast.classList.add("hidden");
+  });
+}
+
 window.symconnectHostNotification = (data) => {
   if (data && data.message) {
-    alert(`${data.title || "Notification"}:\n\n${data.message}`);
+    if (data.title === "Chat Message") {
+      // Append to host chat log
+      const div = document.createElement("div");
+      div.className = "chat-msg other";
+      
+      // Parse out the sender prefix if needed, or just display raw
+      let text = data.message;
+      if (text.startsWith("Viewer says: ")) text = text.substring(13);
+      div.textContent = text;
+      
+      // Remove empty state if present
+      const emptyState = hostChatLog.querySelector(".empty-state");
+      if (emptyState) emptyState.remove();
+      
+      hostChatLog.appendChild(div);
+      hostChatLog.scrollTop = hostChatLog.scrollHeight;
+      
+      // Update badge if panel is hidden
+      if (hostChatPanel && hostChatPanel.classList.contains("hidden")) {
+        unreadHostChats++;
+        hostChatBadge.innerText = unreadHostChats;
+        hostChatBadge.classList.remove("hidden");
+      }
+    } else if (data.title === "File Received") {
+      // Show file toast
+      let filename = data.message;
+      if (filename.startsWith("File saved to Downloads: ")) {
+         filename = filename.substring(25);
+      }
+      hostFileName.innerText = filename;
+      hostFileToast.classList.remove("hidden");
+      
+      // Auto hide after 10 seconds
+      setTimeout(() => hostFileToast.classList.add("hidden"), 10000);
+    } else {
+      // Fallback
+      alert(`${data.title || "Notification"}:\n\n${data.message}`);
+    }
   }
 };
 

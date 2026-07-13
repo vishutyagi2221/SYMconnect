@@ -114,6 +114,36 @@
         <span id="hostStatusDot" class="dot dot-connecting"></span>
         <span id="hostConnectionStatus">Connecting to secure server...</span>
       </div>
+
+      <!-- Host Floating Actions -->
+      <div id="hostFloatingActions" class="host-actions">
+        <button id="hostChatToggle" class="btn-chat-toggle" title="Open Chats">
+          dY' Chats <span id="hostChatBadge" class="badge-count hidden">0</span>
+        </button>
+      </div>
+
+      <!-- Host Chat Panel -->
+      <div id="hostChatPanel" class="host-chat-panel hidden">
+        <div class="panel-header">
+          <h3>Live Chat</h3>
+          <button id="closeHostChat" class="icon-button">?</button>
+        </div>
+        <div id="hostChatLog" class="chat-messages">
+           <div class="empty-state" style="font-size: 0.9em;">No messages yet...</div>
+        </div>
+      </div>
+
+      <!-- Host File Notification Toast -->
+      <div id="hostFileToast" class="host-toast hidden">
+        <div class="toast-content">
+          <strong id="hostFileTitle">File Received</strong>
+          <p id="hostFileName">filename.txt</p>
+        </div>
+        <div class="toast-actions">
+          <button id="hostFileClose" class="button">Close</button>
+          <button id="hostFileOpen" class="button button-primary">dY" Show in Folder</button>
+        </div>
+      </div>
     </div>
 
     <!-- VIEWER SCREEN (Full Screen) -->
