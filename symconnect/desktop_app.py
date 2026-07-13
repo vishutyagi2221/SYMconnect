@@ -160,7 +160,7 @@ def main() -> None:
         or read_server_url_config()
     )
     if not configured_url and not getattr(sys, "frozen", False):
-        configured_url = "ws://127.0.0.1:8765"
+        configured_url = "wss://symconnect.onrender.com"
     server_url = normalize_server_base(configured_url)
     api = Api(session_id, pairing_code, server_url)
 

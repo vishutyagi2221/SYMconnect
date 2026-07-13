@@ -327,12 +327,14 @@ def resolve_server_url(cli_value: str) -> str:
     )
     if env_value:
         return env_value
+    if env_value:
+        return env_value
 
     config_value = read_server_url_config()
     if config_value:
         return config_value
 
-    default = "ws://127.0.0.1:8765/ws/host"
+    default = "wss://symconnect.onrender.com/ws/host"
     console.print("[yellow]Server URL is required for public testing.[/yellow]")
     console.print("Example: wss://relay.your-domain.example")
     answer = console.input(f"Server WebSocket URL [{default}]: ").strip()
