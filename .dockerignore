@@ -1,0 +1,13 @@
+.git
+.github
+.venv*
+build
+dist
+installer
+live-session-fix
+user-side-test
+__pycache__
+*.pyc
+*.exe
+*.zip
+*.log

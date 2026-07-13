@@ -1,0 +1,9 @@
+fastapi>=0.111,<1
+uvicorn[standard]>=0.30,<1
+websockets>=12,<16
+mss>=9,<11
+pillow>=10,<13
+pynput>=1.7,<2
+rich>=13,<15
+pywebview>=6,<7
+pythonnet>=3,<4; sys_platform == "win32"
