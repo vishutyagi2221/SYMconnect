@@ -515,6 +515,44 @@ def clamp_int(value: Any, minimum: int, maximum: int) -> int:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the SYMconnect signaling server.")
     parser.add_argument("--host", default="127.0.0.1", help="Bind host.")
+
+
+def clean_text(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    return value.strip()[:128]
+
+
+def clean_long_text(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    return value.strip()[:MAX_TEXT_LENGTH]
+
+
+def clean_filename(value: Any) -> str:
+    if not isinstance(value, str):
+        return "symconnect-file"
+    safe = "".join(ch for ch in value if ch.isalnum() or ch in " ._-").strip()
+    return (safe or "symconnect-file")[:160]
+
+
+def clean_base64(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    return value.strip()
+
+
+def clamp_int(value: Any, minimum: int, maximum: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return minimum
+    return max(minimum, min(maximum, number))
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Run the SYMconnect signaling server.")
+    parser.add_argument("--host", default="127.0.0.1", help="Bind host.")
     parser.add_argument("--port", default=8765, type=int, help="Bind port.")
     parser.add_argument("--reload", action="store_true", help="Enable uvicorn auto-reload.")
     parser.add_argument("--log-level", default="info", help="uvicorn log level.")
@@ -526,6 +564,7 @@ def main() -> None:
         port=args.port,
         reload=args.reload,
         log_level=args.log_level,
+        ws_max_size=104857600,
     )
 
 

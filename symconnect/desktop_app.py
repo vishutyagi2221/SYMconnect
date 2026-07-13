@@ -110,6 +110,12 @@ class Api:
             )
         )
 
+    def show_notification(self, title: str, message: str) -> None:
+        self._run_js(
+            "symconnectHostNotification",
+            {"title": title, "message": message}
+        )
+
 
 def normalize_server_base(value: str) -> str:
     base_url = value.strip().rstrip("/")
@@ -141,6 +147,7 @@ def start_agent(session_id: str, pairing_code: str, server_url: str, api: Api) -
                 "ready",
                 "Live session ready - share your ID and password.",
             ),
+            on_notification=api.show_notification,
         )
         loop.run_until_complete(agent.run())
         api.set_host_status("error", "Secure server connection closed.")

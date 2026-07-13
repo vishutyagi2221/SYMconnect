@@ -564,6 +564,12 @@ function symconnectBootstrap(payload) {
 window.symconnectBootstrap = symconnectBootstrap;
 window.symconnectApplyHostStatus = symconnectApplyHostStatus;
 
+window.symconnectHostNotification = (data) => {
+  if (data && data.message) {
+    alert(`${data.title || "Notification"}:\n\n${data.message}`);
+  }
+};
+
 window.addEventListener("pywebviewready", () => {
   void loadHostCredentials();
   void loadHostStatus();

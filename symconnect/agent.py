@@ -39,7 +39,7 @@ from .protocol import (
 from .screen_capture import ScreenCapture
 
 console = Console()
-MAX_FILE_BYTES = 8 * 1024 * 1024
+MAX_FILE_BYTES = 50 * 1024 * 1024
 PAIRING_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 
@@ -55,6 +55,7 @@ class HostAgent:
         quality: int,
         control_approval: Callable[[], bool] | None = None,
         on_registered: Callable[[], None] | None = None,
+        on_notification: Callable[[str, str], None] | None = None,
     ) -> None:
         self.server = server
         self.session_id = session_id
@@ -67,6 +68,7 @@ class HostAgent:
         self.viewer_connected = asyncio.Event()
         self.control_approval = control_approval
         self.on_registered = on_registered
+        self.on_notification = on_notification
         self.ws: Any = None
 
     async def run(self) -> None:
@@ -154,6 +156,8 @@ class HostAgent:
                 self.control_enabled = False
                 self.control_request_pending = False
                 console.print("[yellow]Viewer disconnected. Control disabled.[/yellow]")
+                self.control_request_pending = False
+                console.print("[yellow]Viewer disconnected. Control disabled.[/yellow]")
             elif event_type == CONTROL_REQUEST:
                 await self.handle_control_request()
             elif event_type == CONTROL_REVOKE:
@@ -164,6 +168,8 @@ class HostAgent:
                 text = str(event.get("text") or "").strip()
                 if text:
                     console.print(f"[cyan]Viewer chat:[/cyan] {text}")
+                    if self.on_notification:
+                        self.on_notification("Chat Message", text)
             elif event_type == SETTINGS_UPDATE:
                 self.apply_settings(event)
             elif event_type == CLIPBOARD_TEXT:
@@ -199,75 +205,6 @@ class HostAgent:
                 return
 
             while True:
-                answer = await asyncio.to_thread(
-                    console.input,
-                    "Type YES to approve or NO to deny remote control: ",
-                )
-                normalized = answer.strip().lower()
-                if normalized in {"yes", "y"}:
-                    self.control_enabled = True
-                    console.print("[green]Remote control approved.[/green]")
-                    await self.send(message(CONTROL_DECISION, approved=True, reason="Approved by host."))
-                    return
-                if normalized in {"no", "n"}:
-                    self.control_enabled = False
-                    console.print("[yellow]Remote control denied.[/yellow]")
-                    await self.send(message(CONTROL_DECISION, approved=False, reason="Denied by host."))
-                    return
-                console.print("[yellow]Input ignored. Type YES to approve or NO to deny.[/yellow]")
-        finally:
-            self.control_request_pending = False
-
-    async def send_status(self, text: str) -> None:
-        await self.send(message(HOST_STATUS, detail=text))
-
-    def apply_settings(self, event: dict[str, Any]) -> None:
-        self.fps = max(1, min(int(event.get("fps") or self.fps), 30))
-        self.capture.jpeg_quality = max(20, min(int(event.get("quality") or self.capture.jpeg_quality), 95))
-        self.capture.max_width = max(640, min(int(event.get("max_width") or self.capture.max_width), 3840))
-        console.print(
-            f"[green]Quality updated:[/green] fps={self.fps}, "
-            f"quality={self.capture.jpeg_quality}, max_width={self.capture.max_width}"
-        )
-
-    async def handle_clipboard_text(self, event: dict[str, Any]) -> None:
-        text = str(event.get("text") or "")
-        if not text:
-            return
-        try:
-            await asyncio.to_thread(set_clipboard_text, text)
-            console.print("[green]Clipboard text received from viewer.[/green]")
-            await self.send(message(HOST_STATUS, detail="Clipboard text applied on host."))
-        except Exception as exc:
-            console.print(f"[yellow]Clipboard update failed:[/yellow] {exc}")
-            await self.send(message(HOST_STATUS, detail="Clipboard update failed on host."))
-
-    async def handle_file_send(self, event: dict[str, Any]) -> None:
-        filename = safe_filename(str(event.get("name") or "symconnect-file"))
-        encoded = str(event.get("data") or "")
-        try:
-            encoded = encoded + '=' * (-len(encoded) % 4)
-            content = base64.b64decode(encoded, validate=False)
-        except Exception as exc:
-            console.print(f"[red]Base64 decode failed:[/red] {exc}")
-            await self.send(message(FILE_STATUS, ok=False, detail=f"{filename}: invalid file data."))
-            return
-        if len(content) > MAX_FILE_BYTES:
-            await self.send(message(FILE_STATUS, ok=False, detail=f"{filename}: file is larger than 8 MB."))
-            return
-
-        target_dir = Path.home() / "Downloads" / "SYMconnectTransfers"
-        target_dir.mkdir(parents=True, exist_ok=True)
-        target_path = unique_path(target_dir / filename)
-        await asyncio.to_thread(target_path.write_bytes, content)
-        console.print(f"[green]File received:[/green] {target_path}")
-        await self.send(message(FILE_STATUS, ok=True, detail=f"Saved file on host: {target_path.name}"))
-
-    async def send(self, payload: dict[str, Any]) -> None:
-        await self.ws.send(json.dumps(payload, separators=(",", ":")))
-
-    async def receive(self) -> dict[str, Any]:
-        return parse_json(await self.ws.recv())
 
 
 def parse_json(raw: str) -> dict[str, Any]:
