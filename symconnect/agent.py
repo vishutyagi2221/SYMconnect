@@ -198,6 +198,12 @@ class HostAgent:
                 except Exception as exc:
                     console.print(f"[yellow]Control approval dialog failed:[/yellow] {exc}")
                     approved = False
+
+                self.control_enabled = approved
+                reason = "Approved by host." if approved else "Denied by host."
+                await self.send(message(CONTROL_DECISION, approved=approved, reason=reason))
+                return
+
             else:
                 console.print("[yellow]No approval GUI attached; auto-denying control request.[/yellow]")
                 approved = False
