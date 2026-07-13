@@ -3,16 +3,13 @@ const elements = {
   homeScreen: document.getElementById("homeScreen"),
   viewerScreen: document.getElementById("viewerScreen"),
   splashScreen: document.getElementById("splashScreen"),
-
+  
   // Home Form
   form: document.getElementById("connectForm"),
   sessionId: document.getElementById("sessionId"),
   pairingCode: document.getElementById("pairingCode"),
   connectButton: document.getElementById("connectButton"),
-  connectError: document.getElementById("connectError"),
-  copyHostId: document.getElementById("copyHostId"),
-  copyHostPassword: document.getElementById("copyHostPassword"),
-
+  
   // Toolbar
   requestControlButton: document.getElementById("requestControlButton"),
   releaseControlButton: document.getElementById("releaseControlButton"),
@@ -25,28 +22,28 @@ const elements = {
   statusText: document.getElementById("statusText"),
   hostStatusDot: document.getElementById("hostStatusDot"),
   hostConnectionStatus: document.getElementById("hostConnectionStatus"),
-
+  
   // Canvas
   stage: document.getElementById("screenStage"),
   canvas: document.getElementById("screenCanvas"),
-
+  
   // Modals
   chatOverlay: document.getElementById("chatOverlay"),
   chatForm: document.getElementById("chatForm"),
   chatInput: document.getElementById("chatInput"),
   chatLog: document.getElementById("chatLog"),
   closeChat: document.getElementById("closeChat"),
-
+  
   fileOverlay: document.getElementById("fileOverlay"),
   fileInput: document.getElementById("fileInput"),
   sendFileButton: document.getElementById("sendFileButton"),
   closeFile: document.getElementById("closeFile"),
-
+  
   clipboardOverlay: document.getElementById("clipboardOverlay"),
   clipboardText: document.getElementById("clipboardText"),
   sendClipboardButton: document.getElementById("sendClipboardButton"),
   closeClipboard: document.getElementById("closeClipboard"),
-
+  
   settingsOverlay: document.getElementById("settingsOverlay"),
   qualityPreset: document.getElementById("qualityPreset"),
   applyQualityButton: document.getElementById("applyQualityButton"),
@@ -62,7 +59,6 @@ const state = {
   imageRect: { x: 0, y: 0, width: 0, height: 0 },
   frameCount: 0,
   lastPointerMove: 0,
-  serverUrl: "",
 };
 
 // Splash screen logic
@@ -88,11 +84,8 @@ validateForm(); // Initial state
 
 elements.form.addEventListener("submit", (event) => {
   event.preventDefault();
-  void connect();
+  connect();
 });
-
-elements.copyHostId.addEventListener("click", () => copyCredential("fakeId", "Session ID copied"));
-elements.copyHostPassword.addEventListener("click", () => copyCredential("fakePass", "Password copied"));
 
 elements.disconnectButton.addEventListener("click", () => disconnect());
 
@@ -129,7 +122,7 @@ elements.clipboardButton.addEventListener("click", async () => {
   if (!state.controlAllowed) return;
   try {
     const text = await navigator.clipboard.readText();
-    send({ type: "clipboard:text", text });
+    send({ type: "clipboard:sync", text });
     setStatus("Clipboard text sent to host");
   } catch (err) {
     toggleModal(elements.clipboardOverlay, true);
@@ -138,7 +131,7 @@ elements.clipboardButton.addEventListener("click", async () => {
 elements.closeClipboard.addEventListener("click", () => toggleModal(elements.clipboardOverlay, false));
 elements.sendClipboardButton.addEventListener("click", () => {
   const text = elements.clipboardText.value;
-  send({ type: "clipboard:text", text });
+  send({ type: "clipboard:sync", text });
   setStatus("Clipboard text sent to host");
   toggleModal(elements.clipboardOverlay, false);
 });
@@ -172,13 +165,13 @@ elements.sendFileButton.addEventListener("click", () => {
   }
   const file = elements.fileInput.files[0];
   if (!file) return;
-
+  
   const reader = new FileReader();
   reader.onload = (e) => {
     // Correctly split data URL to just get the base64 part
     const base64 = e.target.result.split(',')[1];
     send({
-      type: "file:send",
+      type: "file:transfer",
       name: file.name,
       data: base64
     });
@@ -194,7 +187,7 @@ elements.applyQualityButton.addEventListener("click", () => {
   let fps = 8, quality = 62;
   if (preset === "sharp") { fps = 15; quality = 85; }
   else if (preset === "fast") { fps = 8; quality = 30; }
-
+  
   if (state.connected) {
     send({ type: "settings:update", fps, quality });
     setStatus(`Requested stream settings: ${preset}`);
@@ -239,34 +232,20 @@ window.addEventListener("resize", resizeCanvas);
 // --- WebSocket Logic ---
 async function connect() {
   disconnect();
-  setConnectError("");
 
   const sessionId = elements.sessionId.value.trim();
   const pairingCode = elements.pairingCode.value.trim();
-
-  let ws;
-  try {
-    let baseUrl = state.serverUrl;
-    if (!baseUrl && window.pywebview?.api) {
-      baseUrl = String(await window.pywebview.api.get_server_url()).trim().replace(/\/+$/, "");
-    }
-
-    let wsUrl = "";
-    if (/^wss?:\/\//i.test(baseUrl)) {
-      wsUrl = `${baseUrl}/ws/viewer`;
-    } else if (/^https?:$/i.test(window.location.protocol) && window.location.host) {
-      const scheme = window.location.protocol === "https:" ? "wss" : "ws";
-      wsUrl = `${scheme}://${window.location.host}/ws/viewer`;
-    } else {
-      throw new Error("Server configuration is missing");
-    }
-    ws = new WebSocket(wsUrl);
-  } catch (error) {
-    setConnectError(error?.message || "Unable to start the connection.");
-    elements.connectButton.disabled = false;
-    elements.connectButton.textContent = "Join Session";
-    return;
+  
+  let wsUrl = "";
+  if (window.pywebview && window.pywebview.api) {
+    const baseUrl = await window.pywebview.api.get_server_url();
+    wsUrl = `${baseUrl}/ws/viewer`;
+  } else {
+    const scheme = window.location.protocol === "https:" ? "wss" : "ws";
+    wsUrl = `${scheme}://${window.location.host}/ws/viewer`;
   }
+  
+  const ws = new WebSocket(wsUrl);
 
   elements.connectButton.disabled = true;
   elements.connectButton.textContent = "Connecting...";
@@ -293,16 +272,14 @@ async function connect() {
     state.ws = null;
     renderConnectionState();
     setStatus("Disconnected");
-    if (!elements.connectError.textContent) setConnectError("Session disconnected.");
     switchScreen("home");
   });
 
   ws.addEventListener("error", () => {
     if (state.ws !== ws) return;
     setStatus("Connection failed");
-    setConnectError("Could not reach the secure relay server.");
     elements.connectButton.disabled = false;
-    elements.connectButton.textContent = "Join Session";
+    elements.connectButton.textContent = "Connect to Host";
   });
 }
 
@@ -315,7 +292,7 @@ function disconnect() {
   renderConnectionState();
   switchScreen("home");
   elements.connectButton.disabled = false;
-  elements.connectButton.textContent = "Join Session";
+  elements.connectButton.textContent = "Connect to Host";
 }
 
 function switchScreen(screen) {
@@ -366,7 +343,6 @@ function handleMessage(data) {
       break;
     case "server:error":
       setStatus(data.detail || "Server error");
-      setConnectError(data.detail || "Server rejected the connection.");
       renderConnectionState();
       break;
   }
@@ -406,7 +382,7 @@ function drawFrame() {
   const height = image.height * scale;
   const x = (elements.canvas.width - width) / 2;
   const y = (elements.canvas.height - height) / 2;
-
+  
   state.imageRect = { x, y, width, height };
   ctx.imageSmoothingEnabled = true;
   ctx.drawImage(image, x, y, width, height);
@@ -488,21 +464,6 @@ function setStatus(text) {
   elements.statusText.textContent = text;
 }
 
-function setConnectError(text) {
-  elements.connectError.textContent = text;
-}
-
-async function copyCredential(elementId, successText) {
-  const value = document.getElementById(elementId)?.textContent?.trim();
-  if (!value || value === "Loading..." || value === "------") return;
-  try {
-    await navigator.clipboard.writeText(value);
-    elements.hostConnectionStatus.textContent = successText;
-  } catch (error) {
-    console.error("Clipboard copy failed", error);
-  }
-}
-
 function isTypingTarget(target) {
   if (!target) return false;
   const tagName = target.tagName;
@@ -535,60 +496,18 @@ async function loadHostStatus() {
   if (!api || !elements.hostConnectionStatus || !elements.hostStatusDot) return;
 
   try {
-    symconnectApplyHostStatus(await api.get_host_status());
+    const status = await api.get_host_status();
+    const state = ["connecting", "ready", "error"].includes(status?.state)
+      ? status.state
+      : "error";
+
+    elements.hostConnectionStatus.textContent = status?.detail || "Connection status unavailable.";
+    elements.hostStatusDot.classList.remove("dot-connecting", "dot-ready", "dot-error");
+    elements.hostStatusDot.classList.add(`dot-${state}`);
   } catch (error) {
     console.error("Failed to load host status", error);
   }
 }
-
-function symconnectApplyHostStatus(status) {
-  const statusState = ["connecting", "ready", "error"].includes(status?.state)
-    ? status.state
-    : "error";
-
-  elements.hostConnectionStatus.textContent = status?.detail || "Connection status unavailable.";
-  elements.hostStatusDot.classList.remove("dot-connecting", "dot-ready", "dot-error");
-  elements.hostStatusDot.classList.add(`dot-${statusState}`);
-}
-
-function symconnectBootstrap(payload) {
-  const credentials = payload?.credentials;
-  if (credentials?.id && credentials?.pass) {
-    document.getElementById("fakeId").textContent = credentials.id;
-    document.getElementById("fakePass").textContent = credentials.pass;
-  }
-  state.serverUrl = String(payload?.server_url || "").trim().replace(/\/+$/, "");
-  symconnectApplyHostStatus(payload?.status);
-}
-
-window.symconnectBootstrap = symconnectBootstrap;
-window.symconnectApplyHostStatus = symconnectApplyHostStatus;
-
-window.symconnectHostNotification = (data) => {
-  if (data && data.message) {
-    alert(`${data.title || "Notification"}:\n\n${data.message}`);
-  }
-};
-
-let updateDownloadUrl = "";
-
-window.symconnectShowUpdate = (data) => {
-  const banner = document.getElementById("updateBanner");
-  if (banner && data && data.url) {
-    updateDownloadUrl = data.url;
-    banner.innerText = `A new version (v${data.version}) is available! Click here to update automatically.`;
-    banner.style.display = "block";
-    
-    banner.addEventListener("click", () => {
-      banner.innerText = "Downloading update, please wait... The app will restart shortly.";
-      banner.style.pointerEvents = "none";
-      banner.style.background = "#eab308";
-      if (window.pywebview && window.pywebview.api) {
-        window.pywebview.api.trigger_app_update(updateDownloadUrl);
-      }
-    });
-  }
-};
 
 window.addEventListener("pywebviewready", () => {
   void loadHostCredentials();

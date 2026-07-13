@@ -40,6 +40,8 @@ from symconnect.agent import (
     default_session_id,
     read_server_url_config,
 )
+from symconnect.updater import check_for_updates, trigger_update
+from symconnect.version import VERSION
 
 
 class Api:
@@ -116,6 +118,9 @@ class Api:
             {"title": title, "message": message}
         )
 
+    def trigger_app_update(self, download_url: str) -> None:
+        trigger_update(download_url)
+
 
 def normalize_server_base(value: str) -> str:
     base_url = value.strip().rstrip("/")
@@ -180,7 +185,7 @@ def main() -> None:
         html_path = base_path / "static" / "index.html"
 
     window = webview.create_window(
-        "SYMconnect",
+        f"SYMconnect v{VERSION}",
         html_path.as_uri(),
         js_api=api,
         width=1180,
@@ -197,6 +202,14 @@ def main() -> None:
             args=(session_id, pairing_code, server_url, api),
             daemon=True,
         ).start()
+
+    def on_update_found(latest_tag: str, download_url: str) -> None:
+        api._run_js(
+            "symconnectShowUpdate",
+            {"version": latest_tag, "url": download_url}
+        )
+
+    check_for_updates(on_update_found)
 
     webview.start()
 
