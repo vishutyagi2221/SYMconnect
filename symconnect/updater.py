@@ -34,15 +34,15 @@ def check_for_updates(on_update_available: Callable[[str, str], None]) -> None:
                         
                         if is_newer:
                             # Found a newer version! Find the asset.
-                        assets = data.get("assets", [])
-                        download_url = None
-                        for asset in assets:
-                            if asset.get("name", "").startswith("SYMconnect-Setup") and asset.get("name", "").endswith(".exe"):
-                                download_url = asset.get("browser_download_url")
-                                break
-                        
-                        if download_url:
-                            on_update_available(latest_tag, download_url)
+                            assets = data.get("assets", [])
+                            download_url = None
+                            for asset in assets:
+                                if asset.get("name", "").startswith("SYMconnect-Setup") and asset.get("name", "").endswith(".exe"):
+                                    download_url = asset.get("browser_download_url")
+                                    break
+                            
+                            if download_url:
+                                on_update_available(latest_tag, download_url)
         except Exception as e:
             logger.warning(f"Failed to check for updates: {e}")
 
