@@ -24,8 +24,16 @@ def check_for_updates(on_update_available: Callable[[str, str], None]) -> None:
                 if response.status == 200:
                     data = json.loads(response.read().decode('utf-8'))
                     latest_tag = data.get("tag_name", "").lstrip("v")
-                    if latest_tag and latest_tag != VERSION:
-                        # Found a newer version! Find the asset.
+                    if latest_tag:
+                        try:
+                            latest_tuple = tuple(map(int, latest_tag.split('.')))
+                            current_tuple = tuple(map(int, VERSION.split('.')))
+                            is_newer = latest_tuple > current_tuple
+                        except ValueError:
+                            is_newer = latest_tag != VERSION
+                        
+                        if is_newer:
+                            # Found a newer version! Find the asset.
                         assets = data.get("assets", [])
                         download_url = None
                         for asset in assets:
