@@ -170,11 +170,18 @@ def start_agent(session_id: str, pairing_code: str, server_url: str, api: Api) -
             ),
             on_notification=api.show_notification,
         )
-        loop.run_until_complete(agent.run())
-        api.set_host_status("error", "Secure server connection closed.")
-    except Exception as exc:
-        detail = str(exc).strip() or type(exc).__name__
-        api.set_host_status("error", f"Connection failed: {detail}")
+        retry_delay = 2
+        while True:
+            try:
+                loop.run_until_complete(agent.run())
+                api.set_host_status("error", "Secure server connection closed. Retrying...")
+            except Exception as exc:
+                detail = str(exc).strip() or type(exc).__name__
+                api.set_host_status("error", f"Connection failed: {detail}. Retrying in {retry_delay}s...")
+            
+            # Simple backoff up to 10 seconds
+            time.sleep(retry_delay)
+            retry_delay = min(10, retry_delay * 2)
     finally:
         loop.close()
 
