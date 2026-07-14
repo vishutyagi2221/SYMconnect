@@ -18,6 +18,7 @@ PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 OutputDir=output
 OutputBaseFilename=SYMconnect-Setup-{#MyAppVersion}
+SetupIconFile=..\symconnect\static\icon.ico
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern

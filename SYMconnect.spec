@@ -35,6 +35,7 @@ exe = EXE(
     [],
     name="SYMconnect",
     debug=False,
+    icon="symconnect/static/icon.ico",
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
