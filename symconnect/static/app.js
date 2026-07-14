@@ -173,6 +173,13 @@ elements.sendFileButton.addEventListener("click", () => {
   const file = elements.fileInput.files[0];
   if (!file) return;
 
+  if (file.size > 8 * 1024 * 1024) {
+    setStatus("Error: File is too large. Maximum size is 8 MB.");
+    elements.fileInput.value = "";
+    return;
+  }
+
+  setStatus(`Reading file ${file.name}...`);
   const reader = new FileReader();
   reader.onload = (e) => {
     // Correctly split data URL to just get the base64 part
