@@ -571,6 +571,27 @@ function symconnectBootstrap(payload) {
 window.symconnectBootstrap = symconnectBootstrap;
 window.symconnectApplyHostStatus = symconnectApplyHostStatus;
 
+// --- Event Polling ---
+async function pollBackend() {
+  if (!window.pywebview || !window.pywebview.api) {
+    setTimeout(pollBackend, 200);
+    return;
+  }
+  
+  try {
+    const events = await window.pywebview.api.get_events();
+    for (const event of events) {
+      if (window[event.name]) {
+        window[event.name](event.payload);
+      }
+    }
+  } catch (err) {
+    console.error("Polling error:", err);
+  }
+  setTimeout(pollBackend, 300);
+}
+setTimeout(pollBackend, 200);
+
 // --- Host UI Elements ---
 const hostChatToggle = document.getElementById("hostChatToggle");
 const hostChatBadge = document.getElementById("hostChatBadge");

@@ -46,39 +46,38 @@ from symconnect.version import VERSION
 
 
 class Api:
-    def __init__(self, session_id: str, pairing_code: str, base_url: str) -> None:
+    def __init__(self, session_id: str, pairing_code: str, base_url: str):
         self.session_id = session_id
         self.pairing_code = pairing_code
         self.base_url = base_url
         self.window: Any = None
-        self._status_lock = threading.Lock()
         self._host_status = {
-            "state": "connecting" if base_url else "error",
+            "state": "connecting",
             "detail": (
                 "Connecting to secure server..."
                 if base_url
                 else "Server configuration is missing. Reinstall SYMconnect or contact support."
             ),
         }
+        self._status_lock = threading.Lock()
+        self._events = []
+        self._events_lock = threading.Lock()
 
     def attach_window(self, window: Any) -> None:
         self.window = window
 
-    def _run_js(self, function_name: str, payload: dict[str, Any]) -> None:
-        if self.window is None:
-            return
-        script = (
-            f"if (window.{function_name}) {{ "
-            f"window.{function_name}({json.dumps(payload)}); "
-            "}"
-        )
-        try:
-            self.window.run_js(script)
-        except Exception:
-            return
+    def get_events(self) -> list[dict[str, Any]]:
+        with self._events_lock:
+            events = self._events
+            self._events = []
+            return events
+
+    def _emit_event(self, name: str, payload: dict[str, Any]) -> None:
+        with self._events_lock:
+            self._events.append({"name": name, "payload": payload})
 
     def publish_bootstrap(self) -> None:
-        self._run_js(
+        self._emit_event(
             "symconnectBootstrap",
             {
                 "credentials": self.get_credentials(),
@@ -100,7 +99,7 @@ class Api:
     def set_host_status(self, state: str, detail: str) -> None:
         with self._status_lock:
             self._host_status = {"state": state, "detail": detail}
-        self._run_js("symconnectApplyHostStatus", self.get_host_status())
+        self._emit_event("symconnectApplyHostStatus", self.get_host_status())
 
     def confirm_control_request(self) -> bool:
         if self.window is None:
@@ -114,7 +113,7 @@ class Api:
         )
 
     def show_notification(self, title: str, message: str) -> None:
-        self._run_js(
+        self._emit_event(
             "symconnectHostNotification",
             {"title": title, "message": message}
         )
@@ -230,7 +229,7 @@ def main() -> None:
             ).start()
 
         def on_update_found(latest_tag: str, download_url: str) -> None:
-            api._run_js(
+            api._emit_event(
                 "symconnectShowUpdate",
                 {"version": latest_tag, "url": download_url}
             )
