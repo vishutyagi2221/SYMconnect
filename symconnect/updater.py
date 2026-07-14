@@ -56,7 +56,12 @@ def trigger_update(download_url: str) -> None:
             
             # Run installer silently and restart
             # /SILENT shows progress bar. /SP- skips "This will install..." prompt.
-            subprocess.Popen([str(installer_path), "/SILENT", "/SP-"])
+            creation_flags = 0x00000008 | 0x00000200 # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+            subprocess.Popen(
+                [str(installer_path), "/SILENT", "/SP-"],
+                creationflags=creation_flags,
+                close_fds=True
+            )
             
             # Exit current app to allow overwrite
             os._exit(0)
