@@ -166,6 +166,11 @@ class HostAgent:
                 text = str(event.get("text") or "").strip()
                 if text:
                     console.print(f"[cyan]Viewer chat:[/cyan] {text}")
+                    if self.on_notification:
+                        try:
+                            self.on_notification("Chat Message", f"Viewer says: {text}")
+                        except Exception as exc:
+                            console.print(f"[yellow]Notification callback failed:[/yellow] {exc}")
             elif event_type == SETTINGS_UPDATE:
                 self.apply_settings(event)
             elif event_type == CLIPBOARD_TEXT:
@@ -237,13 +242,18 @@ class HostAgent:
     async def handle_file_send(self, event: dict[str, Any]) -> None:
         filename = safe_filename(str(event.get("name") or "symconnect-file"))
         encoded = str(event.get("data") or "")
+        
+        await self.send(message(HOST_STATUS, detail=f"Receiving file {filename}..."))
+        
         try:
             encoded = encoded + '=' * (-len(encoded) % 4)
-            content = base64.b64decode(encoded, validate=False)
+            # Run base64 decoding in a thread to avoid blocking the event loop
+            content = await asyncio.to_thread(base64.b64decode, encoded, validate=False)
         except Exception as exc:
             console.print(f"[red]Base64 decode failed:[/red] {exc}")
             await self.send(message(FILE_STATUS, ok=False, detail=f"{filename}: invalid file data."))
             return
+            
         if len(content) > MAX_FILE_BYTES:
             await self.send(message(FILE_STATUS, ok=False, detail=f"{filename}: file is larger than 8 MB."))
             return
@@ -251,12 +261,16 @@ class HostAgent:
         target_dir = Path.home() / "Downloads" / "SYMconnectTransfers"
         target_dir.mkdir(parents=True, exist_ok=True)
         target_path = unique_path(target_dir / filename)
+        
+        await self.send(message(HOST_STATUS, detail=f"Saving file {filename}..."))
         await asyncio.to_thread(target_path.write_bytes, content)
         console.print(f"[green]File received:[/green] {target_path}")
         await self.send(message(FILE_STATUS, ok=True, detail=f"Saved file on host: {target_path.name}"))
+        await self.send(message(HOST_STATUS, detail=f"File transfer complete."))
+        
         if self.on_notification:
             try:
-                self.on_notification("file", target_path.name)
+                self.on_notification("File Received", target_path.name)
             except Exception as exc:
                 console.print(f"[yellow]Notification callback failed:[/yellow] {exc}")
 

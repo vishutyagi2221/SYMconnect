@@ -191,9 +191,9 @@ elements.sendFileButton.addEventListener("click", () => {
 
 elements.applyQualityButton.addEventListener("click", () => {
   const preset = elements.qualityPreset.value;
-  let fps = 8, quality = 62;
-  if (preset === "sharp") { fps = 15; quality = 85; }
-  else if (preset === "fast") { fps = 8; quality = 30; }
+  let fps = 12, quality = 75;
+  if (preset === "sharp") { fps = 10; quality = 95; }
+  else if (preset === "fast") { fps = 15; quality = 30; }
 
   if (state.connected) {
     send({ type: "settings:update", fps, quality });
