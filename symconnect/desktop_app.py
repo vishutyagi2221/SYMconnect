@@ -217,22 +217,28 @@ def main() -> None:
         background_color="#0a0a0a",
     )
     api.attach_window(window)
-    window.events.loaded += api.publish_bootstrap
+    def on_loaded() -> None:
+        api.publish_bootstrap()
+        
+        if server_url and not hasattr(api, "_agent_started"):
+            api._agent_started = True
+            threading.Thread(
+                target=start_agent,
+                args=(session_id, pairing_code, server_url, api),
+                daemon=True,
+            ).start()
 
-    if server_url:
-        threading.Thread(
-            target=start_agent,
-            args=(session_id, pairing_code, server_url, api),
-            daemon=True,
-        ).start()
+        def on_update_found(latest_tag: str, download_url: str) -> None:
+            api._run_js(
+                "symconnectShowUpdate",
+                {"version": latest_tag, "url": download_url}
+            )
+        
+        if not hasattr(api, "_update_checked"):
+            api._update_checked = True
+            check_for_updates(on_update_found)
 
-    def on_update_found(latest_tag: str, download_url: str) -> None:
-        api._run_js(
-            "symconnectShowUpdate",
-            {"version": latest_tag, "url": download_url}
-        )
-
-    check_for_updates(on_update_found)
+    window.events.loaded += on_loaded
 
     webview.start()
 
