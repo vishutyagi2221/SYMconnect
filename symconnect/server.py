@@ -33,6 +33,7 @@ from .protocol import (
     HOST_STATUS,
     INPUT_KEY,
     INPUT_MOUSE,
+    INPUT_RESET,
     SERVER_ERROR,
     SESSION_STATE,
     SETTINGS_UPDATE,
@@ -416,7 +417,7 @@ async def viewer_socket(websocket: WebSocket) -> None:
                             data=clean_base64(event.get("data")),
                         ),
                     )
-            elif event_type in {INPUT_MOUSE, INPUT_KEY}:
+            elif event_type in {INPUT_MOUSE, INPUT_KEY, INPUT_RESET}:
                 if session.control_allowed:
                     await send_json(session.host, event)
                 else:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import threading
 import time
 from dataclasses import dataclass
 from io import BytesIO
@@ -24,11 +25,12 @@ class ScreenCapture:
         self.monitor_index = monitor_index
         self.max_width = max_width
         self.jpeg_quality = jpeg_quality
-        self._sct = mss.mss()
-        if monitor_index >= len(self._sct.monitors):
-            available = len(self._sct.monitors) - 1
-            raise ValueError(f"Monitor {monitor_index} not available. Available monitors: 1-{available}.")
-        self.monitor = self._sct.monitors[monitor_index]
+        self._thread_state = threading.local()
+        with mss.mss() as capture:
+            if monitor_index >= len(capture.monitors):
+                available = len(capture.monitors) - 1
+                raise ValueError(f"Monitor {monitor_index} not available. Available monitors: 1-{available}.")
+            self.monitor = dict(capture.monitors[monitor_index])
 
     @property
     def bounds(self) -> dict[str, int]:
@@ -40,7 +42,11 @@ class ScreenCapture:
         }
 
     def grab(self) -> Frame:
-        raw = self._sct.grab(self.monitor)
+        capture = getattr(self._thread_state, "capture", None)
+        if capture is None:
+            capture = mss.mss()
+            self._thread_state.capture = capture
+        raw = capture.grab(self.monitor)
         image = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
         screen_width, screen_height = image.size
 
@@ -50,7 +56,7 @@ class ScreenCapture:
             image = image.resize((self.max_width, resized_height), Image.Resampling.BILINEAR)
 
         buffer = BytesIO()
-        image.save(buffer, format="JPEG", quality=self.jpeg_quality, optimize=True)
+        image.save(buffer, format="JPEG", quality=self.jpeg_quality, subsampling=2)
         encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
 
         return Frame(

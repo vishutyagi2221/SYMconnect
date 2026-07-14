@@ -36,6 +36,7 @@ from .protocol import (
     HOST_STATUS,
     INPUT_KEY,
     INPUT_MOUSE,
+    INPUT_RESET,
     SETTINGS_UPDATE,
     VIEWER_CONNECTED,
     VIEWER_DISCONNECTED,
@@ -89,40 +90,53 @@ class HostAgent:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
-        async with websockets.connect(ws_url, max_size=None, ping_interval=20, additional_headers=headers) as websocket:
-            self.ws = websocket
-            await self.send(
-                message(
-                    HOST_HELLO,
-                    session_id=self.session_id,
-                    pairing_code=self.pairing_code,
-                    host_name=socket.gethostname(),
+        try:
+            async with websockets.connect(
+                ws_url,
+                max_size=None,
+                ping_interval=20,
+                compression=None,
+                additional_headers=headers,
+            ) as websocket:
+                self.ws = websocket
+                await self.send(
+                    message(
+                        HOST_HELLO,
+                        session_id=self.session_id,
+                        pairing_code=self.pairing_code,
+                        host_name=socket.gethostname(),
+                    )
                 )
-            )
 
-            registered = await self.receive()
-            if registered.get("type") != HOST_REGISTERED:
-                detail = registered.get("detail", "Server rejected host registration.")
-                raise RuntimeError(str(detail))
+                registered = await self.receive()
+                if registered.get("type") != HOST_REGISTERED:
+                    detail = registered.get("detail", "Server rejected host registration.")
+                    raise RuntimeError(str(detail))
 
-            if self.on_registered is not None:
-                try:
-                    self.on_registered()
-                except Exception as exc:
-                    console.print(f"[yellow]Host status callback failed:[/yellow] {exc}")
+                if self.on_registered is not None:
+                    try:
+                        self.on_registered()
+                    except Exception as exc:
+                        console.print(f"[yellow]Host status callback failed:[/yellow] {exc}")
 
-            console.print(f"Connected to server: [green]{self.server}[/green]")
-            stream_task = asyncio.create_task(self.stream_loop(), name="screen-stream")
-            receive_task = asyncio.create_task(self.receive_loop(), name="agent-receiver")
-            clipboard_task = asyncio.create_task(self.clipboard_monitor_loop(), name="clipboard-monitor")
-            done, pending = await asyncio.wait(
-                {stream_task, receive_task, clipboard_task},
-                return_when=asyncio.FIRST_EXCEPTION,
-            )
-            for task in pending:
-                task.cancel()
-            for task in done:
-                task.result()
+                console.print(f"Connected to server: [green]{self.server}[/green]")
+                stream_task = asyncio.create_task(self.stream_loop(), name="screen-stream")
+                receive_task = asyncio.create_task(self.receive_loop(), name="agent-receiver")
+                clipboard_task = asyncio.create_task(self.clipboard_monitor_loop(), name="clipboard-monitor")
+                done, pending = await asyncio.wait(
+                    {stream_task, receive_task, clipboard_task},
+                    return_when=asyncio.FIRST_EXCEPTION,
+                )
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                for task in done:
+                    task.result()
+        finally:
+            self.viewer_connected.clear()
+            self.control_enabled = False
+            self.control_request_pending = False
+            self.input_controller.release_all()
 
     async def stream_loop(self) -> None:
         sequence = 0
@@ -130,7 +144,7 @@ class HostAgent:
             await self.viewer_connected.wait()
             while self.viewer_connected.is_set():
                 started = time.perf_counter()
-                frame = self.capture.grab()
+                frame = await asyncio.to_thread(self.capture.grab)
                 sequence += 1
                 await self.send(
                     message(
@@ -153,11 +167,13 @@ class HostAgent:
             event_type = event.get("type")
 
             if event_type == VIEWER_CONNECTED:
+                self.input_controller.release_all()
                 self.viewer_connected.set()
                 self.control_enabled = False
                 self.control_request_pending = False
                 console.print("[green]Viewer connected.[/green]")
             elif event_type == VIEWER_DISCONNECTED:
+                self.input_controller.release_all()
                 self.viewer_connected.clear()
                 self.control_enabled = False
                 self.control_request_pending = False
@@ -165,6 +181,7 @@ class HostAgent:
             elif event_type == CONTROL_REQUEST:
                 await self.handle_control_request()
             elif event_type == CONTROL_REVOKE:
+                self.input_controller.release_all()
                 self.control_enabled = False
                 self.control_request_pending = False
                 console.print("[yellow]Viewer released control.[/yellow]")
@@ -189,6 +206,8 @@ class HostAgent:
                 self.input_controller.handle_mouse(event)
             elif event_type == INPUT_KEY and self.control_enabled:
                 self.input_controller.handle_key(event)
+            elif event_type == INPUT_RESET:
+                self.input_controller.release_all()
 
     async def clipboard_monitor_loop(self) -> None:
         last_text = None
@@ -376,10 +395,10 @@ def main() -> None:
     parser.add_argument("--server", default="", help="Host WebSocket URL.")
     parser.add_argument("--session-id", default="", help="Optional fixed session ID.")
     parser.add_argument("--pairing-code", default="", help="Optional fixed pairing code.")
-    parser.add_argument("--fps", default=8, type=int, help="Capture frames per second.")
+    parser.add_argument("--fps", default=15, type=int, help="Capture frames per second.")
     parser.add_argument("--monitor", default=1, type=int, help="Monitor index from mss. Usually 1.")
-    parser.add_argument("--max-width", default=1366, type=int, help="Max encoded frame width. Use 0 for native size.")
-    parser.add_argument("--quality", default=62, type=int, help="JPEG quality from 1 to 95.")
+    parser.add_argument("--max-width", default=1600, type=int, help="Max encoded frame width. Use 0 for native size.")
+    parser.add_argument("--quality", default=68, type=int, help="JPEG quality from 1 to 95.")
     args = parser.parse_args()
 
     try:

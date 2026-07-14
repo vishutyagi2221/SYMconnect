@@ -59,9 +59,14 @@ const state = {
   controlAllowed: false,
   controlPending: false,
   latestImage: null,
+  pendingFrameImage: null,
+  frameDecoding: false,
   imageRect: { x: 0, y: 0, width: 0, height: 0 },
   frameCount: 0,
-  lastPointerMove: 0,
+  pendingPointerPoint: null,
+  pointerMoveFrame: null,
+  pressedButtons: new Set(),
+  pressedKeys: new Map(),
   serverUrl: "",
 };
 
@@ -134,6 +139,7 @@ elements.requestControlButton.addEventListener("click", () => {
 });
 
 elements.releaseControlButton.addEventListener("click", () => {
+  releaseRemoteInputs();
   state.controlAllowed = false;
   state.controlPending = false;
   send({ type: "control:revoke" });
@@ -226,12 +232,12 @@ elements.sendFileButton.addEventListener("click", () => {
 
 elements.applyQualityButton.addEventListener("click", () => {
   const preset = elements.qualityPreset.value;
-  let fps = 12, quality = 75;
-  if (preset === "sharp") { fps = 10; quality = 95; }
-  else if (preset === "fast") { fps = 15; quality = 30; }
+  let fps = 15, quality = 68, maxWidth = 1600;
+  if (preset === "sharp") { fps = 12; quality = 82; maxWidth = 1920; }
+  else if (preset === "fast") { fps = 20; quality = 50; maxWidth = 1280; }
 
   if (state.connected) {
-    send({ type: "settings:update", fps, quality });
+    send({ type: "settings:update", fps, quality, max_width: maxWidth });
     setStatus(`Requested stream settings: ${preset}`);
   }
   toggleModal(elements.settingsOverlay, false);
@@ -241,15 +247,15 @@ elements.applyQualityButton.addEventListener("click", () => {
 elements.canvas.addEventListener("contextmenu", (event) => event.preventDefault());
 elements.canvas.addEventListener("pointerdown", (event) => {
   elements.canvas.focus();
+  try { elements.canvas.setPointerCapture(event.pointerId); } catch {}
   sendMouse("down", event);
 });
-elements.canvas.addEventListener("pointerup", (event) => sendMouse("up", event));
-elements.canvas.addEventListener("pointermove", (event) => {
-  const now = performance.now();
-  if (now - state.lastPointerMove < 30) return;
-  state.lastPointerMove = now;
-  sendMouse("move", event);
+elements.canvas.addEventListener("pointerup", (event) => {
+  sendMouse("up", event);
+  try { elements.canvas.releasePointerCapture(event.pointerId); } catch {}
 });
+elements.canvas.addEventListener("pointercancel", releaseRemoteInputs);
+elements.canvas.addEventListener("pointermove", queuePointerMove);
 elements.canvas.addEventListener(
   "wheel",
   (event) => {
@@ -269,6 +275,11 @@ elements.canvas.addEventListener(
 
 window.addEventListener("keydown", (event) => sendKey("down", event));
 window.addEventListener("keyup", (event) => sendKey("up", event));
+window.addEventListener("blur", releaseRemoteInputs);
+window.addEventListener("pagehide", releaseRemoteInputs);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") releaseRemoteInputs();
+});
 window.addEventListener("resize", resizeCanvas);
 
 window.addEventListener("paste", async (e) => {
@@ -360,6 +371,7 @@ async function connect() {
 
   ws.addEventListener("close", () => {
     if (state.ws !== ws) return;
+    clearTrackedInputs();
     state.connected = false;
     state.controlAllowed = false;
     state.controlPending = false;
@@ -380,6 +392,7 @@ async function connect() {
 }
 
 function disconnect() {
+  releaseRemoteInputs();
   if (state.ws) state.ws.close();
   state.ws = null;
   state.connected = false;
@@ -423,6 +436,7 @@ function handleMessage(data) {
       setStatus(data.detail || "Host status updated");
       break;
     case "control:state":
+      if (state.controlAllowed && !data.allowed) releaseRemoteInputs();
       state.controlAllowed = Boolean(data.allowed);
       state.controlPending = Boolean(data.pending);
       setStatus(data.reason || (state.controlAllowed ? "Control approved by host" : "Control denied"));
@@ -449,14 +463,30 @@ function handleMessage(data) {
 }
 
 function receiveFrame(data) {
+  if (!data.image) return;
+  state.pendingFrameImage = data.image;
+  decodePendingFrame();
+}
+
+function decodePendingFrame() {
+  if (state.frameDecoding || !state.pendingFrameImage) return;
+  const encodedImage = state.pendingFrameImage;
+  state.pendingFrameImage = null;
+  state.frameDecoding = true;
   const image = new Image();
   image.onload = () => {
     state.latestImage = image;
     state.frameCount += 1;
     elements.stage.classList.add("has-frame");
     drawFrame();
+    state.frameDecoding = false;
+    decodePendingFrame();
   };
-  image.src = `data:image/jpeg;base64,${data.image}`;
+  image.onerror = () => {
+    state.frameDecoding = false;
+    decodePendingFrame();
+  };
+  image.src = `data:image/jpeg;base64,${encodedImage}`;
 }
 
 function resizeCanvas() {
@@ -490,25 +520,62 @@ function drawFrame() {
 
 function sendMouse(action, event) {
   if (!state.controlAllowed) return;
-  const point = normalizePointer(event);
+  const point = normalizePointer(event, action === "up");
   if (!point) return;
   event.preventDefault();
+  const button = pointerButton(event.button);
+  if (action === "down") state.pressedButtons.add(button);
+  else if (action === "up") state.pressedButtons.delete(button);
   send({
     type: "input:mouse",
     action,
-    button: pointerButton(event.button),
+    button,
     x_pct: point.x,
     y_pct: point.y,
   });
 }
 
+function queuePointerMove(event) {
+  if (!state.controlAllowed) return;
+  const point = normalizePointer(event);
+  if (!point) return;
+  event.preventDefault();
+  state.pendingPointerPoint = point;
+  if (state.pointerMoveFrame !== null) return;
+
+  state.pointerMoveFrame = window.requestAnimationFrame(() => {
+    state.pointerMoveFrame = null;
+    const latestPoint = state.pendingPointerPoint;
+    state.pendingPointerPoint = null;
+    if (!state.controlAllowed || !latestPoint) return;
+    send({
+      type: "input:mouse",
+      action: "move",
+      button: "left",
+      x_pct: latestPoint.x,
+      y_pct: latestPoint.y,
+    });
+  });
+}
+
 function sendKey(action, event) {
   if (!state.controlAllowed || isTypingTarget(event.target)) return;
-  if (action === "down" && event.repeat) return;
+  if (action === "down" && event.repeat) {
+    event.preventDefault();
+    return;
+  }
   
   // Ignore Ctrl+V because the 'paste' event will handle it natively
   if (event.ctrlKey && event.key.toLowerCase() === 'v') {
     return;
+  }
+
+  const token = event.code || `key:${event.key.toLowerCase()}`;
+  if (action === "down") {
+    if (state.pressedKeys.has(token)) return;
+    state.pressedKeys.set(token, { key: event.key, code: event.code });
+  } else if (action === "up") {
+    state.pressedKeys.delete(token);
   }
 
   event.preventDefault();
@@ -520,12 +587,35 @@ function sendKey(action, event) {
   });
 }
 
-function normalizePointer(event) {
+function releaseRemoteInputs() {
+  if (state.controlAllowed && state.ws?.readyState === WebSocket.OPEN) {
+    for (const key of state.pressedKeys.values()) {
+      send({ type: "input:key", action: "up", key: key.key, code: key.code });
+    }
+    send({ type: "input:reset" });
+  }
+  clearTrackedInputs();
+}
+
+function clearTrackedInputs() {
+  state.pressedKeys.clear();
+  state.pressedButtons.clear();
+  state.pendingPointerPoint = null;
+  if (state.pointerMoveFrame !== null) {
+    window.cancelAnimationFrame(state.pointerMoveFrame);
+    state.pointerMoveFrame = null;
+  }
+}
+
+function normalizePointer(event, allowOutside = false) {
   if (!state.latestImage) return null;
   const rect = elements.canvas.getBoundingClientRect();
   const x = event.clientX - rect.left - state.imageRect.x;
   const y = event.clientY - rect.top - state.imageRect.y;
-  if (x < 0 || y < 0 || x > state.imageRect.width || y > state.imageRect.height) return null;
+  if (
+    !allowOutside &&
+    (x < 0 || y < 0 || x > state.imageRect.width || y > state.imageRect.height)
+  ) return null;
   return {
     x: clamp(x / state.imageRect.width),
     y: clamp(y / state.imageRect.height),

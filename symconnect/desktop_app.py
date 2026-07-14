@@ -208,10 +208,10 @@ def start_agent(session_id: str, pairing_code: str, server_url: str, api: Api) -
             server=server_url,
             session_id=session_id,
             pairing_code=pairing_code,
-            fps=12,
+            fps=15,
             monitor=1,
-            max_width=1920,
-            quality=75,
+            max_width=1600,
+            quality=68,
             control_approval=api._confirm_control_request,
             on_registered=lambda: api._set_host_status(
                 "ready",
@@ -291,4 +291,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

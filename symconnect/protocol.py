@@ -22,6 +22,7 @@ CONTROL_REVOKE = "control:revoke"
 
 INPUT_MOUSE = "input:mouse"
 INPUT_KEY = "input:key"
+INPUT_RESET = "input:reset"
 
 CHAT_MESSAGE = "chat:message"
 FILE_SEND = "file:send"

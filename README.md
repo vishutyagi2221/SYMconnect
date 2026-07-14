@@ -133,6 +133,8 @@ Run a local single-PC demo:
 - The relay rate-limits failed pairing attempts and returns a generic rejection message.
 - A valid session password permits viewing; interactive control still requires explicit host approval.
 - File transfer and clipboard operations are available only while control is approved.
+- Injected keys and mouse buttons are tracked and released on focus loss, control release, or disconnect.
+- Screen capture runs outside the input event loop and the viewer drops stale undecoded frames to limit latency.
 - There is no unattended `Easy Access`, stealth mode, or approval bypass.
 
 See [SECURITY.md](SECURITY.md) before exposing a relay publicly.
