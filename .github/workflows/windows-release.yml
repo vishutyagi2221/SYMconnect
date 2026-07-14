@@ -48,10 +48,11 @@ jobs:
         shell: pwsh
         run: |
           if ([string]::IsNullOrWhiteSpace($env:SERVER_URL)) {
-            throw 'Set the repository variable SYMCONNECT_SERVER_URL before building.'
+            $env:SERVER_URL = 'wss://symconnect.onrender.com/ws/host'
+            Write-Host "SYMCONNECT_SERVER_URL variable not set. Using default: $env:SERVER_URL"
           }
-          if ($env:SERVER_URL -notmatch '^wss://') {
-            throw 'SYMCONNECT_SERVER_URL must use wss:// for production builds.'
+          if ($env:SERVER_URL -notmatch '^wss?://') {
+            throw 'SYMCONNECT_SERVER_URL must use wss:// or ws://'
           }
           New-Item -ItemType Directory -Force -Path build-config | Out-Null
           [System.IO.File]::WriteAllText(
