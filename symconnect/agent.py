@@ -55,6 +55,7 @@ class HostAgent:
         quality: int,
         control_approval: Callable[[], bool] | None = None,
         on_registered: Callable[[], None] | None = None,
+        on_notification: Callable[[str, str], None] | None = None,
     ) -> None:
         self.server = server
         self.session_id = session_id
@@ -67,6 +68,7 @@ class HostAgent:
         self.viewer_connected = asyncio.Event()
         self.control_approval = control_approval
         self.on_registered = on_registered
+        self.on_notification = on_notification
         self.ws: Any = None
 
     async def run(self) -> None:
@@ -252,6 +254,11 @@ class HostAgent:
         await asyncio.to_thread(target_path.write_bytes, content)
         console.print(f"[green]File received:[/green] {target_path}")
         await self.send(message(FILE_STATUS, ok=True, detail=f"Saved file on host: {target_path.name}"))
+        if self.on_notification:
+            try:
+                self.on_notification("file", target_path.name)
+            except Exception as exc:
+                console.print(f"[yellow]Notification callback failed:[/yellow] {exc}")
 
     async def send(self, payload: dict[str, Any]) -> None:
         await self.ws.send(json.dumps(payload, separators=(",", ":")))
