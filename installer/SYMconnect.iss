@@ -29,6 +29,7 @@ CloseApplications=force
 RestartApplications=no
 SetupLogging=yes
 UninstallDisplayIcon={app}\{#MyAppExeName}
+ChangesAssociations=yes
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"

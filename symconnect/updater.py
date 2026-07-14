@@ -50,7 +50,7 @@ def check_for_updates(on_update_available: Callable[[str, str], None]) -> None:
 
 
 def trigger_update(download_url: str) -> None:
-    \"\"\"Downloads the setup exe and runs it silently, then exits the current app.\"\"\"
+    """Downloads the setup exe and runs it silently, then exits the current app."""
     def _download_and_install() -> None:
         try:
             # Save to temp dir
