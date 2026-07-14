@@ -37,23 +37,17 @@ def test_auth_attempt_limiter_blocks_and_resets() -> None:
 
 
 def test_desktop_api_pushes_bootstrap_and_status() -> None:
-    class FakeWindow:
-        def __init__(self) -> None:
-            self.scripts: list[str] = []
-
-        def run_js(self, script: str) -> None:
-            self.scripts.append(script)
-
-    window = FakeWindow()
     api = Api("CV-A1B2C3D4", "ABCDEFGH", "wss://relay.example")
-    api.attach_window(window)
     api.publish_bootstrap()
     api.set_host_status("ready", "Live session ready")
 
-    assert "symconnectBootstrap" in window.scripts[0]
-    assert "CV-A1B2C3D4" in window.scripts[0]
-    assert "wss://relay.example" in window.scripts[0]
-    assert "symconnectApplyHostStatus" in window.scripts[1]
+    events = api.get_events()
+    assert len(events) == 2
+    assert events[0]["name"] == "symconnectBootstrap"
+    assert "CV-A1B2C3D4" in str(events[0]["payload"])
+    assert "wss://relay.example" in str(events[0]["payload"])
+    assert events[1]["name"] == "symconnectApplyHostStatus"
+    assert "Live session ready" in str(events[1]["payload"])
 
 
 def test_stream_waits_for_viewer() -> None:
