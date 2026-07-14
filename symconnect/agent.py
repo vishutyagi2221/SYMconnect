@@ -3,15 +3,19 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import hashlib
 import json
 import os
 import secrets
 import socket
+import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from PIL import Image, ImageGrab
 
 import websockets
 from rich.console import Console
@@ -20,6 +24,7 @@ from .input_control import InputController
 from .protocol import (
     CHAT_MESSAGE,
     CLIPBOARD_TEXT,
+    CLIPBOARD_SYNC,
     CONTROL_DECISION,
     CONTROL_REQUEST,
     CONTROL_REVOKE,
@@ -109,8 +114,9 @@ class HostAgent:
             console.print(f"Connected to server: [green]{self.server}[/green]")
             stream_task = asyncio.create_task(self.stream_loop(), name="screen-stream")
             receive_task = asyncio.create_task(self.receive_loop(), name="agent-receiver")
+            clipboard_task = asyncio.create_task(self.clipboard_monitor_loop(), name="clipboard-monitor")
             done, pending = await asyncio.wait(
-                {stream_task, receive_task},
+                {stream_task, receive_task, clipboard_task},
                 return_when=asyncio.FIRST_EXCEPTION,
             )
             for task in pending:
@@ -175,12 +181,50 @@ class HostAgent:
                 self.apply_settings(event)
             elif event_type == CLIPBOARD_TEXT:
                 await self.handle_clipboard_text(event)
+            elif event_type == CLIPBOARD_SYNC:
+                await self.handle_clipboard_sync(event)
             elif event_type == FILE_SEND:
                 await self.handle_file_send(event)
             elif event_type == INPUT_MOUSE and self.control_enabled:
                 self.input_controller.handle_mouse(event)
             elif event_type == INPUT_KEY and self.control_enabled:
                 self.input_controller.handle_key(event)
+
+    async def clipboard_monitor_loop(self) -> None:
+        last_text = None
+        last_image_hash = None
+        while True:
+            await asyncio.sleep(1.5)
+            if not self.control_enabled:
+                continue
+
+            try:
+                # Check for image first
+                img = await asyncio.to_thread(ImageGrab.grabclipboard)
+                if isinstance(img, Image.Image):
+                    # It's an image
+                    img_bytes = img.tobytes()
+                    img_hash = hashlib.md5(img_bytes).hexdigest()
+                    if img_hash != last_image_hash:
+                        last_image_hash = img_hash
+                        # It changed! Send it.
+                        import io
+                        buffered = io.BytesIO()
+                        img.convert("RGB").save(buffered, format="PNG")
+                        img_b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
+                        await self.send(message(CLIPBOARD_SYNC, format="image", data=img_b64))
+                        last_text = None # reset text so we don't send both
+                    continue
+
+                # Check for text
+                text = await asyncio.to_thread(get_windows_clipboard_text)
+                if text and text != last_text:
+                    last_text = text
+                    last_image_hash = None
+                    await self.send(message(CLIPBOARD_SYNC, format="text", data=text))
+            except Exception:
+                pass
+
 
     async def handle_control_request(self) -> None:
         if self.control_enabled:
@@ -238,6 +282,22 @@ class HostAgent:
         except Exception as exc:
             console.print(f"[yellow]Clipboard update failed:[/yellow] {exc}")
             await self.send(message(HOST_STATUS, detail="Clipboard update failed on host."))
+
+    async def handle_clipboard_sync(self, event: dict[str, Any]) -> None:
+        fmt = event.get("format")
+        data = str(event.get("data") or "")
+        if not data:
+            return
+        try:
+            if fmt == "text":
+                await asyncio.to_thread(set_windows_clipboard_text, data)
+                console.print("[green]Clipboard text synced from viewer.[/green]")
+            elif fmt == "image":
+                decoded = base64.b64decode(data, validate=False)
+                await asyncio.to_thread(set_windows_clipboard_image, decoded)
+                console.print("[green]Clipboard image synced from viewer.[/green]")
+        except Exception as exc:
+            console.print(f"[yellow]Clipboard sync failed:[/yellow] {exc}")
 
     async def handle_file_send(self, event: dict[str, Any]) -> None:
         filename = safe_filename(str(event.get("name") or "symconnect-file"))
@@ -436,6 +496,46 @@ def set_windows_clipboard_text(text: str) -> None:
     finally:
         user32.CloseClipboard()
 
+def get_windows_clipboard_text() -> str | None:
+    import ctypes
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    cf_unicode_text = 13
+
+    if not user32.IsClipboardFormatAvailable(cf_unicode_text):
+        return None
+
+    if not user32.OpenClipboard(None):
+        return None
+    try:
+        handle = user32.GetClipboardData(cf_unicode_text)
+        if not handle:
+            return None
+        locked = kernel32.GlobalLock(handle)
+        if not locked:
+            return None
+        try:
+            return ctypes.c_wchar_p(locked).value
+        finally:
+            kernel32.GlobalUnlock(handle)
+    finally:
+        user32.CloseClipboard()
+
+def set_windows_clipboard_image(img_bytes: bytes) -> None:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as f:
+        f.write(img_bytes)
+        f.flush()
+        temp_path = f.name
+    
+    cmd = [
+        "powershell", "-NoProfile", "-Command",
+        f"Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Clipboard]::SetImage([System.Drawing.Image]::FromFile('{temp_path}'))"
+    ]
+    subprocess.run(cmd, creationflags=subprocess.CREATE_NO_WINDOW)
+    try:
+        os.remove(temp_path)
+    except OSError:
+        pass
 
 if __name__ == "__main__":
     main()

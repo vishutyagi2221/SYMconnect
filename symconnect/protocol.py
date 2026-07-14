@@ -26,7 +26,9 @@ INPUT_KEY = "input:key"
 CHAT_MESSAGE = "chat:message"
 FILE_SEND = "file:send"
 FILE_STATUS = "file:status"
+
 CLIPBOARD_TEXT = "clipboard:text"
+CLIPBOARD_SYNC = "clipboard:sync"
 SETTINGS_UPDATE = "settings:update"
 
 SERVER_ERROR = "server:error"

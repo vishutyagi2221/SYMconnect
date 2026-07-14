@@ -243,6 +243,44 @@ window.addEventListener("keydown", (event) => sendKey("down", event));
 window.addEventListener("keyup", (event) => sendKey("up", event));
 window.addEventListener("resize", resizeCanvas);
 
+window.addEventListener("paste", async (e) => {
+  if (!state.controlAllowed) return;
+  const items = e.clipboardData?.items;
+  if (!items) return;
+
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (item.type.startsWith("text/")) {
+      item.getAsString((text) => {
+        send({ type: "clipboard:sync", format: "text", data: text });
+        setStatus("Sending clipboard text...");
+        // Delay pasting by 300ms to allow host to set its clipboard
+        setTimeout(() => {
+          send({ type: "input:key", action: "down", key: "Control" });
+          send({ type: "input:key", action: "press", key: "v" });
+          send({ type: "input:key", action: "up", key: "Control" });
+        }, 300);
+      });
+      return;
+    } else if (item.type.startsWith("image/")) {
+      const blob = item.getAsFile();
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const base64 = event.target.result.split(',')[1];
+        send({ type: "clipboard:sync", format: "image", data: base64 });
+        setStatus("Sending clipboard image...");
+        setTimeout(() => {
+          send({ type: "input:key", action: "down", key: "Control" });
+          send({ type: "input:key", action: "press", key: "v" });
+          send({ type: "input:key", action: "up", key: "Control" });
+        }, 500);
+      };
+      reader.readAsDataURL(blob);
+      return;
+    }
+  }
+});
+
 // --- WebSocket Logic ---
 async function connect() {
   disconnect();
@@ -371,6 +409,9 @@ function handleMessage(data) {
         }
       }
       break;
+    case "clipboard:sync":
+      handleClipboardSync(data);
+      break;
     case "server:error":
       setStatus(data.detail || "Server error");
       setConnectError(data.detail || "Server rejected the connection.");
@@ -436,6 +477,12 @@ function sendMouse(action, event) {
 function sendKey(action, event) {
   if (!state.controlAllowed || isTypingTarget(event.target)) return;
   if (action === "down" && event.repeat) return;
+  
+  // Ignore Ctrl+V because the 'paste' event will handle it natively
+  if (event.ctrlKey && event.key.toLowerCase() === 'v') {
+    return;
+  }
+
   event.preventDefault();
   send({
     type: "input:key",
@@ -470,6 +517,30 @@ function send(payload) {
 
 function parseMessage(raw) {
   try { return JSON.parse(raw); } catch { return {}; }
+}
+
+function handleClipboardSync(data) {
+  if (data.format === "text" && data.data) {
+    navigator.clipboard.writeText(data.data)
+      .then(() => setStatus("Clipboard text synced from Host"))
+      .catch((err) => console.error("Clipboard write error:", err));
+  } else if (data.format === "image" && data.data) {
+    try {
+      const byteCharacters = atob(data.data);
+      const byteNumbers = new Array(byteCharacters.length);
+      for (let i = 0; i < byteCharacters.length; i++) {
+        byteNumbers[i] = byteCharacters.charCodeAt(i);
+      }
+      const byteArray = new Uint8Array(byteNumbers);
+      const blob = new Blob([byteArray], { type: "image/png" });
+      const item = new ClipboardItem({ "image/png": blob });
+      navigator.clipboard.write([item])
+        .then(() => setStatus("Clipboard image synced from Host"))
+        .catch((err) => console.error("Clipboard write error:", err));
+    } catch (err) {
+      console.error("Failed to decode image from host", err);
+    }
+  }
 }
 
 function renderConnectionState() {
