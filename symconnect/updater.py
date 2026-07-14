@@ -50,24 +50,35 @@ def check_for_updates(on_update_available: Callable[[str, str], None]) -> None:
 
 
 def trigger_update(download_url: str) -> None:
-    """Downloads the setup exe and runs it silently, then exits the current app."""
+    \"\"\"Downloads the setup exe and runs it silently, then exits the current app.\"\"\"
     def _download_and_install() -> None:
         try:
             # Save to temp dir
             temp_dir = Path(os.environ.get("TEMP", str(Path.home())))
             installer_path = temp_dir / "SYMconnect-Update.exe"
             
-            # Download file
+            # Download file in chunks to avoid memory spikes and timeouts
             req = urllib.request.Request(download_url, headers={"User-Agent": "SYMconnect-Updater"})
-            with urllib.request.urlopen(req, timeout=30) as response:
-                installer_path.write_bytes(response.read())
+            with urllib.request.urlopen(req, timeout=60) as response, open(installer_path, 'wb') as out_file:
+                while True:
+                    chunk = response.read(8192)
+                    if not chunk:
+                        break
+                    out_file.write(chunk)
             
-            # Run installer silently and restart
-            # /SILENT shows progress bar. /SP- skips "This will install..." prompt.
-            creation_flags = 0x00000008 | 0x00000200 # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+            # Run installer via PowerShell with a delay to ensure this process fully exits first.
+            # /VERYSILENT hides all dialogs. /SUPPRESSMSGBOXES automatically answers yes.
+            # /FORCECLOSEAPPLICATIONS ensures any lingering processes are killed.
+            cmd = (
+                f"Start-Sleep -Seconds 3; "
+                f"Start-Process -FilePath '{installer_path}' "
+                f"-ArgumentList '/VERYSILENT', '/SP-', '/SUPPRESSMSGBOXES', '/FORCECLOSEAPPLICATIONS' "
+                f"-NoNewWindow"
+            )
+            
             subprocess.Popen(
-                [str(installer_path), "/SILENT", "/SP-"],
-                creationflags=creation_flags,
+                ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", cmd],
+                creationflags=0x08000000, # CREATE_NO_WINDOW
                 close_fds=True
             )
             
