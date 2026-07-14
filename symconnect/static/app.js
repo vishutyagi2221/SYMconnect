@@ -65,6 +65,34 @@ const state = {
   serverUrl: "",
 };
 
+function bootstrapFromWindowLocation() {
+  try {
+    const params = new URLSearchParams(window.location.hash.slice(1));
+    const sessionId = params.get("session_id");
+    const pairingCode = params.get("pairing_code");
+    if (!sessionId || !pairingCode) return;
+
+    symconnectBootstrap({
+      credentials: { id: sessionId, pass: pairingCode },
+      server_url: params.get("server_url") || "",
+      status: {
+        state: params.get("host_state") || "connecting",
+        detail: params.get("host_detail") || "Connecting to secure server...",
+      },
+    });
+
+    try {
+      window.history.replaceState(null, document.title, window.location.pathname);
+    } catch (error) {
+      console.debug("Could not clear startup parameters", error);
+    }
+  } catch (error) {
+    console.error("Failed to load startup credentials", error);
+  }
+}
+
+bootstrapFromWindowLocation();
+
 // Splash screen logic
 setTimeout(() => {
   if (elements.splashScreen) elements.splashScreen.classList.add("hidden");
@@ -658,8 +686,9 @@ async function pollBackend() {
     }
   } catch (err) {
     console.error("Polling error:", err);
+  } finally {
+    setTimeout(pollBackend, 300);
   }
-  setTimeout(pollBackend, 300);
 }
 setTimeout(pollBackend, 200);
 
@@ -746,23 +775,46 @@ window.symconnectHostNotification = (data) => {
   }
 };
 
-let updateDownloadUrl = "";
-
 window.symconnectShowUpdate = (data) => {
   const banner = document.getElementById("updateBanner");
-  if (banner && data && data.url) {
-    updateDownloadUrl = data.url;
+  if (banner && data && data.version) {
     banner.innerText = `A new version (v${data.version}) is available! Click here to update automatically.`;
     banner.style.display = "block";
-    
-    banner.addEventListener("click", () => {
+    banner.style.pointerEvents = "auto";
+    banner.style.background = "#10b981";
+
+    banner.onclick = async () => {
       banner.innerText = "Downloading update, please wait... The app will restart shortly.";
       banner.style.pointerEvents = "none";
       banner.style.background = "#eab308";
-      if (window.pywebview && window.pywebview.api) {
-        window.pywebview.api.trigger_app_update(updateDownloadUrl);
+
+      try {
+        const api = window.pywebview?.api;
+        if (!api) throw new Error("The desktop bridge is not ready. Please try again.");
+        const result = await api.trigger_app_update();
+        if (!result?.ok) throw new Error(result?.error || "Unable to start update.");
+      } catch (error) {
+        window.symconnectUpdateStatus({
+          state: "error",
+          message: `Update failed: ${error.message || error}`,
+        });
       }
-    });
+    };
+  }
+};
+
+window.symconnectUpdateStatus = (data) => {
+  const banner = document.getElementById("updateBanner");
+  if (!banner || !data) return;
+
+  banner.style.display = "block";
+  banner.innerText = data.message || "Updating SYMconnect...";
+  if (data.state === "error") {
+    banner.style.background = "#dc2626";
+    banner.style.pointerEvents = "auto";
+  } else {
+    banner.style.background = data.state === "installing" ? "#2563eb" : "#eab308";
+    banner.style.pointerEvents = "none";
   }
 };
 

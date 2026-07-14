@@ -1,10 +1,18 @@
 import asyncio
 import re
 from contextlib import suppress
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
+from symconnect import __version__
 from symconnect.agent import HostAgent, PAIRING_ALPHABET, default_pairing_code, default_session_id
-from symconnect.desktop_app import Api
+from symconnect.desktop_app import Api, build_ui_url
 from symconnect.server import AUTH_ATTEMPT_LIMIT, AuthAttemptLimiter
+from symconnect.version import VERSION
+
+
+def test_package_version_has_one_source() -> None:
+    assert __version__ == VERSION
 
 
 def test_session_credentials_have_expected_shape() -> None:
@@ -38,8 +46,8 @@ def test_auth_attempt_limiter_blocks_and_resets() -> None:
 
 def test_desktop_api_pushes_bootstrap_and_status() -> None:
     api = Api("CV-A1B2C3D4", "ABCDEFGH", "wss://relay.example")
-    api.publish_bootstrap()
-    api.set_host_status("ready", "Live session ready")
+    api._publish_bootstrap()
+    api._set_host_status("ready", "Live session ready")
 
     events = api.get_events()
     assert len(events) == 2
@@ -48,6 +56,31 @@ def test_desktop_api_pushes_bootstrap_and_status() -> None:
     assert "wss://relay.example" in str(events[0]["payload"])
     assert events[1]["name"] == "symconnectApplyHostStatus"
     assert "Live session ready" in str(events[1]["payload"])
+
+
+def test_desktop_api_keeps_native_window_private() -> None:
+    api = Api("CV-A1B2C3D4", "ABCDEFGH", "wss://relay.example")
+    api._attach_window(object())
+
+    assert "window" not in vars(api)
+    assert "_window" in vars(api)
+
+
+def test_ui_url_contains_bridge_independent_bootstrap(tmp_path: Path) -> None:
+    html_path = tmp_path / "index.html"
+    html_path.touch()
+    url = build_ui_url(
+        html_path,
+        "CV-A1B2C3D4",
+        "ABCDEFGH",
+        "wss://relay.example",
+        {"state": "connecting", "detail": "Connecting"},
+    )
+    params = parse_qs(urlparse(url).fragment)
+
+    assert params["session_id"] == ["CV-A1B2C3D4"]
+    assert params["pairing_code"] == ["ABCDEFGH"]
+    assert params["server_url"] == ["wss://relay.example"]
 
 
 def test_stream_waits_for_viewer() -> None:

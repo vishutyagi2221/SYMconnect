@@ -47,17 +47,16 @@ Build the one-file app and installer:
 
 ```powershell
 .\scripts\build_windows.ps1 `
-  -ServerUrl "wss://relay.your-domain.example" `
-  -Version "0.2.0"
+  -ServerUrl "wss://relay.your-domain.example"
 ```
 
 Output:
 
 ```text
-installer\output\SYMconnect-Setup-0.2.0.exe
+installer\output\SYMconnect-Setup-<version>.exe
 ```
 
-The relay URL is written beside the installed executable and embedded as a fallback. Do not use a temporary TryCloudflare URL for a production release.
+The version is read from `symconnect/version.py`; the build fails if an explicitly supplied version does not match it. The installer includes Microsoft's signed Evergreen WebView2 bootstrapper and installs the runtime only when it is missing. The relay URL is written beside the installed executable and embedded as a fallback. Do not use a temporary TryCloudflare URL for a production release.
 
 ## GitHub Actions releases
 
@@ -70,14 +69,16 @@ The workflow at `.github/workflows/windows-release.yml` builds the app and insta
    SYMCONNECT_SERVER_URL = wss://relay.your-domain.example
    ```
 
-3. Run the `Windows installer` workflow manually, or create a release tag:
+3. Push the version commit and wait for the `Quality checks` workflow to pass.
+4. Create the matching release tag:
 
    ```powershell
-   git tag v0.2.0
-   git push origin v0.2.0
+   $Version = .\.venv\Scripts\python.exe -c "from symconnect.version import VERSION; print(VERSION)"
+   git tag "v$Version"
+   git push origin "v$Version"
    ```
 
-A tag build creates a GitHub Release containing the installer and its SHA256 checksum. Public distribution should additionally use a trusted Windows code-signing certificate to avoid unsigned-app warnings.
+A tag build runs the full preflight again, creates a draft release, uploads or replaces the installer, SHA256 checksum, and `update.json` manifest, and publishes it only after every upload succeeds. Installed apps check the manifest through GitHub's `releases/latest/download` endpoint, avoiding the unauthenticated API rate limit. Public distribution should additionally use a trusted Windows code-signing certificate to avoid unsigned-app warnings.
 
 ## Run the relay
 

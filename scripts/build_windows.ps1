@@ -4,8 +4,7 @@ param(
   [ValidatePattern('^wss://')]
   [string]$ServerUrl,
 
-  [ValidatePattern('^[0-9]+\.[0-9]+\.[0-9]+(?:[-.][A-Za-z0-9]+)?$')]
-  [string]$Version = '0.2.0',
+  [string]$Version = '',
 
   [switch]$SkipInstaller
 )
@@ -13,6 +12,21 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 Set-Location -LiteralPath $ProjectRoot
+
+$VersionSource = Get-Content -LiteralPath (Join-Path $ProjectRoot 'symconnect\version.py') -Raw
+if ($VersionSource -notmatch 'VERSION\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"') {
+  throw 'Could not read the application version from symconnect\version.py.'
+}
+$SourceVersion = $Matches[1]
+if ([string]::IsNullOrWhiteSpace($Version)) {
+  $Version = $SourceVersion
+}
+if ($Version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
+  throw "Invalid build version: $Version"
+}
+if ($Version -ne $SourceVersion) {
+  throw "Build version $Version does not match source version $SourceVersion."
+}
 
 $NormalizedServerUrl = $ServerUrl.Trim().TrimEnd('/')
 $ConfigDirectory = Join-Path $ProjectRoot 'build-config'
@@ -49,6 +63,22 @@ if (-not $Python) {
 }
 Write-Host "Build Python: $Python"
 
+$PytestTemp = Join-Path $ProjectRoot 'build\pytest-tmp'
+New-Item -ItemType Directory -Force -Path $PytestTemp | Out-Null
+& $Python -B -m pytest -q -p no:cacheprovider --basetemp $PytestTemp
+if ($LASTEXITCODE -ne 0) {
+  throw "Tests failed with exit code $LASTEXITCODE"
+}
+
+$Node = Get-Command node.exe -ErrorAction SilentlyContinue
+if (-not $Node) {
+  throw 'Node.js is required to validate the packaged JavaScript.'
+}
+& $Node.Source --check '.\symconnect\static\app.js'
+if ($LASTEXITCODE -ne 0) {
+  throw "JavaScript validation failed with exit code $LASTEXITCODE"
+}
+
 & $Python -m PyInstaller --clean --noconfirm '.\SYMconnect.spec'
 if ($LASTEXITCODE -ne 0) {
   throw "PyInstaller failed with exit code $LASTEXITCODE"
@@ -75,6 +105,22 @@ if (-not $Iscc) {
   throw 'Inno Setup 6 is required. Install it system-wide or under .tools\InnoSetup.'
 }
 
+$WebView2Bootstrapper = Join-Path $ProjectRoot 'installer\MicrosoftEdgeWebView2Setup.exe'
+if (-not (Test-Path -LiteralPath $WebView2Bootstrapper)) {
+  Write-Host 'Downloading the official Microsoft Edge WebView2 bootstrapper...'
+  Invoke-WebRequest `
+    -Uri 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' `
+    -OutFile $WebView2Bootstrapper `
+    -UseBasicParsing
+}
+$WebView2Signature = Get-AuthenticodeSignature -LiteralPath $WebView2Bootstrapper
+if (
+  $WebView2Signature.Status -ne 'Valid' -or
+  $WebView2Signature.SignerCertificate.Subject -notmatch 'Microsoft Corporation'
+) {
+  throw "WebView2 bootstrapper signature is not valid: $($WebView2Signature.Status)"
+}
+
 & $Iscc "/DMyAppVersion=$Version" '.\installer\SYMconnect.iss'
 if ($LASTEXITCODE -ne 0) {
   throw "Inno Setup failed with exit code $LASTEXITCODE"
@@ -82,13 +128,28 @@ if ($LASTEXITCODE -ne 0) {
 
 $InstallerPath = Join-Path $ProjectRoot "installer\output\SYMconnect-Setup-$Version.exe"
 $Hash = Get-FileHash -Algorithm SHA256 -LiteralPath $InstallerPath
+$HashValue = $Hash.Hash.ToLowerInvariant()
 $ChecksumPath = "$InstallerPath.sha256"
-$ChecksumLine = "$($Hash.Hash)  $(Split-Path -Leaf $InstallerPath)"
+$AssetName = Split-Path -Leaf $InstallerPath
+$ChecksumLine = "$HashValue  $AssetName"
 [System.IO.File]::WriteAllText(
   $ChecksumPath,
   "$ChecksumLine`n",
   [System.Text.UTF8Encoding]::new($false)
 )
+$ManifestPath = Join-Path $ProjectRoot 'installer\output\update.json'
+$Manifest = [ordered]@{
+  version = $Version
+  download_url = "https://github.com/vishutyagi2221/SYMconnect/releases/download/v$Version/$AssetName"
+  size = (Get-Item -LiteralPath $InstallerPath).Length
+  sha256 = $HashValue
+} | ConvertTo-Json
+[System.IO.File]::WriteAllText(
+  $ManifestPath,
+  "$Manifest`n",
+  [System.Text.UTF8Encoding]::new($false)
+)
 Write-Host "Installer: $InstallerPath"
-Write-Host "SHA256:   $($Hash.Hash)"
+Write-Host "SHA256:   $HashValue"
 Write-Host "Checksum:  $ChecksumPath"
+Write-Host "Manifest:  $ManifestPath"

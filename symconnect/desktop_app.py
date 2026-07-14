@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import platform
 import sys
 import threading
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 
 def _configure_windows_runtime() -> None:
@@ -41,18 +42,18 @@ from symconnect.agent import (
     default_session_id,
     read_server_url_config,
 )
-from symconnect.updater import check_for_updates, trigger_update
+from symconnect.updater import UpdateInfo, check_for_updates, trigger_update
 from symconnect.version import VERSION
 
 
 class Api:
-    def __init__(self, session_id: str, pairing_code: str, base_url: str):
-        self.session_id = session_id
-        self.pairing_code = pairing_code
-        self.base_url = base_url
-        self.window: Any = None
+    def __init__(self, session_id: str, pairing_code: str, base_url: str) -> None:
+        self._session_id = session_id
+        self._pairing_code = pairing_code
+        self._base_url = base_url
+        self._window: Any = None
         self._host_status = {
-            "state": "connecting",
+            "state": "connecting" if base_url else "error",
             "detail": (
                 "Connecting to secure server..."
                 if base_url
@@ -60,66 +61,94 @@ class Api:
             ),
         }
         self._status_lock = threading.Lock()
-        self._events = []
+        self._events: deque[dict[str, Any]] = deque(maxlen=200)
         self._events_lock = threading.Lock()
+        self._update_lock = threading.Lock()
+        self._pending_update: UpdateInfo | None = None
+        self._update_started = False
 
-    def attach_window(self, window: Any) -> None:
-        self.window = window
+    def _attach_window(self, window: Any) -> None:
+        # This must remain private. pywebview recursively exposes public attributes.
+        self._window = window
 
     def get_events(self) -> list[dict[str, Any]]:
         with self._events_lock:
-            events = self._events
-            self._events = []
+            events = list(self._events)
+            self._events.clear()
             return events
 
     def _emit_event(self, name: str, payload: dict[str, Any]) -> None:
         with self._events_lock:
             self._events.append({"name": name, "payload": payload})
 
-    def publish_bootstrap(self) -> None:
+    def _publish_bootstrap(self) -> None:
         self._emit_event(
             "symconnectBootstrap",
             {
                 "credentials": self.get_credentials(),
-                "server_url": self.base_url,
+                "server_url": self._base_url,
                 "status": self.get_host_status(),
             },
         )
 
     def get_credentials(self) -> dict[str, str]:
-        return {"id": self.session_id, "pass": self.pairing_code}
+        return {"id": self._session_id, "pass": self._pairing_code}
 
     def get_server_url(self) -> str:
-        return self.base_url
+        return self._base_url
 
     def get_host_status(self) -> dict[str, str]:
         with self._status_lock:
             return dict(self._host_status)
 
-    def set_host_status(self, state: str, detail: str) -> None:
+    def _set_host_status(self, state: str, detail: str) -> None:
         with self._status_lock:
             self._host_status = {"state": state, "detail": detail}
         self._emit_event("symconnectApplyHostStatus", self.get_host_status())
 
-    def confirm_control_request(self) -> bool:
-        if self.window is None:
+    def _confirm_control_request(self) -> bool:
+        if self._window is None:
             return False
         return bool(
-            self.window.create_confirmation_dialog(
+            self._window.create_confirmation_dialog(
                 "Remote control request",
                 "A supporter is requesting control of your mouse and keyboard.\n\n"
                 "Select OK to allow or Cancel to deny.",
             )
         )
 
-    def show_notification(self, title: str, message: str) -> None:
+    def _show_notification(self, title: str, message: str) -> None:
         self._emit_event(
             "symconnectHostNotification",
             {"title": title, "message": message}
         )
 
-    def trigger_app_update(self, download_url: str) -> None:
-        trigger_update(download_url)
+    def _offer_update(self, update: UpdateInfo) -> None:
+        with self._update_lock:
+            self._pending_update = update
+            self._update_started = False
+        self._emit_event(
+            "symconnectShowUpdate",
+            {"version": update.version},
+        )
+
+    def _handle_update_status(self, status: dict[str, Any]) -> None:
+        if status.get("state") == "error":
+            with self._update_lock:
+                self._update_started = False
+        self._emit_event("symconnectUpdateStatus", status)
+
+    def trigger_app_update(self) -> dict[str, Any]:
+        with self._update_lock:
+            if self._pending_update is None:
+                return {"ok": False, "error": "No verified update is available."}
+            if self._update_started:
+                return {"ok": False, "error": "The update is already running."}
+            self._update_started = True
+            update = self._pending_update
+
+        trigger_update(update, self._handle_update_status)
+        return {"ok": True, "version": update.version}
         
     def open_downloads_folder(self) -> None:
         import os
@@ -150,6 +179,26 @@ def normalize_server_base(value: str) -> str:
     return base_url.rstrip("/")
 
 
+def build_ui_url(
+    html_path: Path,
+    session_id: str,
+    pairing_code: str,
+    server_url: str,
+    status: dict[str, str],
+) -> str:
+    query = urlencode(
+        {
+            "session_id": session_id,
+            "pairing_code": pairing_code,
+            "server_url": server_url,
+            "host_state": status.get("state", "connecting"),
+            "host_detail": status.get("detail", "Connecting to secure server..."),
+            "app_version": VERSION,
+        }
+    )
+    return f"{html_path.as_uri()}#{query}"
+
+
 def start_agent(session_id: str, pairing_code: str, server_url: str, api: Api) -> None:
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -163,21 +212,24 @@ def start_agent(session_id: str, pairing_code: str, server_url: str, api: Api) -
             monitor=1,
             max_width=1920,
             quality=75,
-            control_approval=api.confirm_control_request,
-            on_registered=lambda: api.set_host_status(
+            control_approval=api._confirm_control_request,
+            on_registered=lambda: api._set_host_status(
                 "ready",
                 "Live session ready - share your ID and password.",
             ),
-            on_notification=api.show_notification,
+            on_notification=api._show_notification,
         )
         retry_delay = 2
         while True:
             try:
                 loop.run_until_complete(agent.run())
-                api.set_host_status("error", "Secure server connection closed. Retrying...")
+                api._set_host_status("error", "Secure server connection closed. Retrying...")
             except Exception as exc:
                 detail = str(exc).strip() or type(exc).__name__
-                api.set_host_status("error", f"Connection failed: {detail}. Retrying in {retry_delay}s...")
+                api._set_host_status(
+                    "error",
+                    f"Connection failed: {detail}. Retrying in {retry_delay}s...",
+                )
             
             # Simple backoff up to 10 seconds
             time.sleep(retry_delay)
@@ -209,36 +261,30 @@ def main() -> None:
 
     window = webview.create_window(
         f"SYMconnect v{VERSION}",
-        html_path.as_uri(),
+        build_ui_url(
+            html_path,
+            session_id,
+            pairing_code,
+            server_url,
+            api.get_host_status(),
+        ),
         js_api=api,
         width=1180,
         height=700,
         min_size=(900, 600),
         background_color="#0a0a0a",
     )
-    api.attach_window(window)
-    def on_loaded() -> None:
-        api.publish_bootstrap()
-        
-        if server_url and not hasattr(api, "_agent_started"):
-            api._agent_started = True
-            threading.Thread(
-                target=start_agent,
-                args=(session_id, pairing_code, server_url, api),
-                daemon=True,
-            ).start()
+    api._attach_window(window)
+    api._publish_bootstrap()
 
-        def on_update_found(latest_tag: str, download_url: str) -> None:
-            api._emit_event(
-                "symconnectShowUpdate",
-                {"version": latest_tag, "url": download_url}
-            )
-        
-        if not hasattr(api, "_update_checked"):
-            api._update_checked = True
-            check_for_updates(on_update_found)
+    if server_url:
+        threading.Thread(
+            target=start_agent,
+            args=(session_id, pairing_code, server_url, api),
+            daemon=True,
+        ).start()
 
-    window.events.loaded += on_loaded
+    check_for_updates(api._offer_update)
 
     webview.start()
 
