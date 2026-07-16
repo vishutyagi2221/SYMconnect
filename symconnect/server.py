@@ -5,33 +5,26 @@ import asyncio
 import hashlib
 import json
 import logging
-import os
 import secrets
-import tempfile
 import time
-import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote
 
 import uvicorn
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from starlette.middleware.cors import CORSMiddleware
 
 from . import __version__
 from .protocol import (
     CHAT_MESSAGE,
-    CLIPBOARD_SYNC,
     CLIPBOARD_TEXT,
     CONTROL_DECISION,
     CONTROL_REQUEST,
     CONTROL_REVOKE,
     CONTROL_STATE,
-    FILE_AVAILABLE,
     FILE_SEND,
     FILE_STATUS,
     HOST_FRAME,
@@ -55,30 +48,10 @@ logger = logging.getLogger("symconnect.server")
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 app = FastAPI(title="SYMconnect", version=__version__)
-
-
-def allowed_cors_origins() -> list[str]:
-    value = os.getenv("SYMCONNECT_ALLOWED_ORIGINS", "").strip()
-    if not value:
-        return ["*"]
-    origins = [origin.strip() for origin in value.split(",") if origin.strip()]
-    return origins or ["*"]
-
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=allowed_cors_origins(),
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["*"],
-    allow_credentials=False,
-    max_age=3600,
-)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 MAX_TEXT_LENGTH = 20_000
 MAX_FILE_BYTES = 8 * 1024 * 1024
-MAX_HTTP_FILE_BYTES = 100 * 1024 * 1024
-FILE_TRANSFER_TTL_SECONDS = 15 * 60
 AUTH_ATTEMPT_LIMIT = 12
 AUTH_ATTEMPT_WINDOW_SECONDS = 60.0
 
@@ -118,18 +91,6 @@ class Session:
     frame_count: int = 0
 
 
-@dataclass
-class FileTransfer:
-    transfer_id: str
-    token: str
-    session_id: str
-    filename: str
-    mime: str
-    path: Path
-    size: int
-    created_at: float = field(default_factory=time.time)
-
-
 class SessionStore:
     def __init__(self) -> None:
         self._sessions: dict[str, Session] = {}
@@ -161,7 +122,7 @@ class SessionStore:
                 return None, "Session not found.", None
             previous_viewer = session.viewer
             session.viewer = viewer
-            session.control_allowed = True
+            session.control_allowed = False
             session.control_pending = False
             return session, None, previous_viewer
 
@@ -206,68 +167,8 @@ class SessionStore:
             return session
 
 
-class FileTransferStore:
-    def __init__(self) -> None:
-        self._transfers: dict[str, FileTransfer] = {}
-        self._lock = asyncio.Lock()
-
-    async def create(
-        self,
-        *,
-        session_id: str,
-        filename: str,
-        mime: str,
-        path: Path,
-        size: int,
-    ) -> FileTransfer:
-        async with self._lock:
-            self._prune_locked()
-            transfer = FileTransfer(
-                transfer_id=uuid.uuid4().hex,
-                token=secrets.token_urlsafe(24),
-                session_id=session_id,
-                filename=filename,
-                mime=mime or "application/octet-stream",
-                path=path,
-                size=size,
-            )
-            self._transfers[transfer.transfer_id] = transfer
-            return transfer
-
-    async def pop(self, transfer_id: str, token: str) -> FileTransfer | None:
-        async with self._lock:
-            self._prune_locked()
-            transfer = self._transfers.get(transfer_id)
-            if transfer is None or not secrets.compare_digest(transfer.token, token):
-                return None
-            return self._transfers.pop(transfer_id)
-
-    async def remove_for_session(self, session_id: str) -> None:
-        async with self._lock:
-            expired = [
-                transfer_id
-                for transfer_id, transfer in self._transfers.items()
-                if transfer.session_id == session_id
-            ]
-            for transfer_id in expired:
-                transfer = self._transfers.pop(transfer_id)
-                delete_path(transfer.path)
-
-    def _prune_locked(self) -> None:
-        cutoff = time.time() - FILE_TRANSFER_TTL_SECONDS
-        expired = [
-            transfer_id
-            for transfer_id, transfer in self._transfers.items()
-            if transfer.created_at < cutoff
-        ]
-        for transfer_id in expired:
-            transfer = self._transfers.pop(transfer_id)
-            delete_path(transfer.path)
-
-
 sessions = SessionStore()
 auth_attempts = AuthAttemptLimiter()
-file_transfers = FileTransferStore()
 
 
 @app.get("/")
@@ -278,103 +179,6 @@ async def index() -> FileResponse:
 @app.get("/health")
 async def health() -> JSONResponse:
     return JSONResponse({"status": "ok", "service": "symconnect"})
-
-
-@app.post("/api/files")
-async def upload_file(request: Request) -> JSONResponse:
-    session_id = clean_text(request.headers.get("x-symconnect-session-id"))
-    pairing_code = clean_text(request.headers.get("x-symconnect-pairing-code"))
-    filename = clean_filename(unquote(request.headers.get("x-symconnect-filename", "")))
-    mime = clean_text(request.headers.get("x-symconnect-mime")) or "application/octet-stream"
-    declared_size = clamp_int(
-        request.headers.get("x-symconnect-size"),
-        0,
-        MAX_HTTP_FILE_BYTES + 1,
-    )
-
-    if not session_id or not pairing_code:
-        raise HTTPException(status_code=400, detail="Missing session credentials.")
-
-    session = await sessions.get(session_id)
-    pairing_hash = hash_pairing_code(pairing_code)
-    if session is None or not secrets.compare_digest(session.pairing_hash, pairing_hash):
-        raise HTTPException(status_code=403, detail="Session ID or password rejected.")
-    if not session.control_allowed:
-        raise HTTPException(status_code=403, detail="File transfer requires approved control.")
-
-    content_length = clamp_int(request.headers.get("content-length"), 0, MAX_HTTP_FILE_BYTES + 1)
-    if declared_size > MAX_HTTP_FILE_BYTES or content_length > MAX_HTTP_FILE_BYTES:
-        raise HTTPException(status_code=413, detail="File is too large. Max size is 100 MB.")
-
-    transfer_dir = Path(tempfile.gettempdir()) / "symconnect-file-transfers"
-    transfer_dir.mkdir(parents=True, exist_ok=True)
-    partial_path = transfer_dir / f"{uuid.uuid4().hex}.part"
-    written = 0
-
-    try:
-        with partial_path.open("wb") as output:
-            async for chunk in request.stream():
-                if not chunk:
-                    continue
-                written += len(chunk)
-                if written > MAX_HTTP_FILE_BYTES:
-                    raise HTTPException(status_code=413, detail="File is too large. Max size is 100 MB.")
-                output.write(chunk)
-    except HTTPException:
-        delete_path(partial_path)
-        raise
-    except Exception as exc:
-        delete_path(partial_path)
-        logger.exception("File upload failed")
-        raise HTTPException(status_code=500, detail="File upload failed.") from exc
-
-    session = await sessions.get(session_id)
-    if session is None or session.host is None:
-        delete_path(partial_path)
-        raise HTTPException(status_code=409, detail="Host is no longer connected.")
-
-    transfer = await file_transfers.create(
-        session_id=session_id,
-        filename=filename,
-        mime=mime,
-        path=partial_path,
-        size=written,
-    )
-    download_url = f"/api/files/{transfer.transfer_id}?token={transfer.token}"
-    await send_json(
-        session.host,
-        message(
-            FILE_AVAILABLE,
-            transfer_id=transfer.transfer_id,
-            name=transfer.filename,
-            size=transfer.size,
-            mime=transfer.mime,
-            download_url=download_url,
-        ),
-    )
-
-    return JSONResponse(
-        {
-            "ok": True,
-            "transfer_id": transfer.transfer_id,
-            "detail": f"Uploaded {transfer.filename}. Waiting for host download.",
-        }
-    )
-
-
-@app.get("/api/files/{transfer_id}")
-async def download_file(transfer_id: str, token: str, background_tasks: BackgroundTasks) -> FileResponse:
-    transfer = await file_transfers.pop(clean_text(transfer_id), token)
-    if transfer is None or not transfer.path.is_file():
-        raise HTTPException(status_code=404, detail="File transfer expired or was already downloaded.")
-
-    background_tasks.add_task(delete_path, transfer.path)
-    return FileResponse(
-        transfer.path,
-        media_type=transfer.mime,
-        filename=transfer.filename,
-        background=background_tasks,
-    )
 
 
 @app.websocket("/ws/host")
@@ -446,17 +250,6 @@ async def host_socket(websocket: WebSocket) -> None:
                         session.viewer,
                         message(CLIPBOARD_TEXT, text=safe_text, direction="from-host"),
                     )
-            elif event_type == CLIPBOARD_SYNC:
-                if session.viewer is not None:
-                    await send_json(
-                        session.viewer,
-                        message(
-                            CLIPBOARD_SYNC,
-                            format=clean_text(event.get("format")),
-                            data=clean_base64(event.get("data")),
-                            direction="from-host",
-                        ),
-                    )
             else:
                 logger.debug("Ignoring host event %s", event_type)
     except WebSocketDisconnect:
@@ -464,7 +257,6 @@ async def host_socket(websocket: WebSocket) -> None:
     finally:
         if session_id is not None:
             session = await sessions.remove_host(session_id, websocket)
-            await file_transfers.remove_for_session(session_id)
             if session is not None and session.viewer is not None:
                 await send_json(session.viewer, message(SERVER_ERROR, detail="Host disconnected."))
                 await session.viewer.close(code=1012)
@@ -608,19 +400,6 @@ async def viewer_socket(websocket: WebSocket) -> None:
                     )
                 else:
                     await send_json(websocket, message(CONTROL_STATE, allowed=False, pending=session.control_pending, reason="Clipboard requires approved control."))
-            elif event_type == CLIPBOARD_SYNC:
-                if session.control_allowed:
-                    await send_json(
-                        session.host,
-                        message(
-                            CLIPBOARD_SYNC,
-                            format=clean_text(event.get("format")),
-                            data=clean_base64(event.get("data")),
-                            direction="to-host",
-                        ),
-                    )
-                else:
-                    await send_json(websocket, message(CONTROL_STATE, allowed=False, pending=session.control_pending, reason="Clipboard requires approved control."))
             elif event_type == FILE_SEND:
                 file_size = clamp_int(event.get("size"), 0, MAX_FILE_BYTES + 1)
                 if not session.control_allowed:
@@ -676,13 +455,9 @@ def parse_json(raw: str) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-async def send_json(ws: WebSocket, payload: dict[str, Any]) -> None:
+async def send_json(websocket: WebSocket, payload: dict[str, Any]) -> None:
     try:
-        await ws.send_json(payload)
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        logger.error("Failed to send JSON: %s", e)
+        await websocket.send_text(json.dumps(payload, separators=(",", ":")))
     except RuntimeError:
         logger.debug("WebSocket send failed because the connection is closed.")
 
@@ -703,13 +478,6 @@ def client_identity(websocket: WebSocket) -> str:
     if websocket.client is not None:
         return websocket.client.host
     return "unknown"
-
-
-def delete_path(path: Path) -> None:
-    try:
-        path.unlink(missing_ok=True)
-    except OSError:
-        logger.warning("Could not delete temporary file %s", path)
 
 
 def clean_text(value: Any) -> str:
