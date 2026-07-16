@@ -12,9 +12,12 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
+import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin
 from PIL import Image, ImageGrab
 
 import websockets
@@ -28,6 +31,7 @@ from .protocol import (
     CONTROL_DECISION,
     CONTROL_REQUEST,
     CONTROL_REVOKE,
+    FILE_AVAILABLE,
     FILE_SEND,
     FILE_STATUS,
     HOST_FRAME,
@@ -46,6 +50,7 @@ from .screen_capture import ScreenCapture
 
 console = Console()
 MAX_FILE_BYTES = 8 * 1024 * 1024
+MAX_HTTP_FILE_BYTES = 100 * 1024 * 1024
 PAIRING_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 
@@ -94,7 +99,8 @@ class HostAgent:
             async with websockets.connect(
                 ws_url,
                 max_size=None,
-                ping_interval=20,
+                ping_interval=60,
+                ping_timeout=120,
                 compression=None,
                 additional_headers=headers,
             ) as websocket:
@@ -200,6 +206,8 @@ class HostAgent:
                 await self.handle_clipboard_text(event)
             elif event_type == CLIPBOARD_SYNC:
                 await self.handle_clipboard_sync(event)
+            elif event_type == FILE_AVAILABLE:
+                await self.handle_file_available(event)
             elif event_type == FILE_SEND:
                 await self.handle_file_send(event)
             elif event_type == INPUT_MOUSE and self.control_enabled:
@@ -311,12 +319,54 @@ class HostAgent:
             if fmt == "text":
                 await asyncio.to_thread(set_windows_clipboard_text, data)
                 console.print("[green]Clipboard text synced from viewer.[/green]")
+                await self.send(message(HOST_STATUS, detail="Clipboard text applied on host."))
             elif fmt == "image":
                 decoded = base64.b64decode(data, validate=False)
                 await asyncio.to_thread(set_windows_clipboard_image, decoded)
                 console.print("[green]Clipboard image synced from viewer.[/green]")
+                await self.send(message(HOST_STATUS, detail="Clipboard image applied on host."))
         except Exception as exc:
             console.print(f"[yellow]Clipboard sync failed:[/yellow] {exc}")
+
+    async def handle_file_available(self, event: dict[str, Any]) -> None:
+        filename = safe_filename(str(event.get("name") or "symconnect-file"))
+        download_url = str(event.get("download_url") or "")
+        try:
+            size = int(event.get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+
+        if not download_url:
+            await self.send(message(FILE_STATUS, ok=False, detail=f"{filename}: download URL is missing."))
+            return
+        if size > MAX_HTTP_FILE_BYTES:
+            await self.send(message(FILE_STATUS, ok=False, detail=f"{filename}: file is larger than 100 MB."))
+            return
+
+        target_dir = Path.home() / "Downloads" / "SYMconnectTransfers"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target_path = unique_path(target_dir / filename)
+
+        await self.send(message(HOST_STATUS, detail=f"Downloading file {filename}..."))
+        try:
+            written = await asyncio.to_thread(
+                download_http_file,
+                resolve_http_url(self.server, download_url),
+                target_path,
+                MAX_HTTP_FILE_BYTES,
+            )
+            console.print(f"[green]File received:[/green] {target_path}")
+            await self.send(message(FILE_STATUS, ok=True, detail=f"Saved file on host: {target_path.name}"))
+            await self.send(message(HOST_STATUS, detail=f"File transfer complete ({written} bytes)."))
+
+            if self.on_notification:
+                try:
+                    self.on_notification("File Received", target_path.name)
+                except Exception as exc:
+                    console.print(f"[yellow]Notification callback failed:[/yellow] {exc}")
+        except Exception as exc:
+            console.print(f"[red]File download failed:[/red] {exc}")
+            await self.send(message(FILE_STATUS, ok=False, detail=f"Failed to download {filename} on host."))
 
     async def handle_file_send(self, event: dict[str, Any]) -> None:
         filename = safe_filename(str(event.get("name") or "symconnect-file"))
@@ -340,18 +390,22 @@ class HostAgent:
         target_dir = Path.home() / "Downloads" / "SYMconnectTransfers"
         target_dir.mkdir(parents=True, exist_ok=True)
         target_path = unique_path(target_dir / filename)
-        
+
         await self.send(message(HOST_STATUS, detail=f"Saving file {filename}..."))
-        await asyncio.to_thread(target_path.write_bytes, content)
-        console.print(f"[green]File received:[/green] {target_path}")
-        await self.send(message(FILE_STATUS, ok=True, detail=f"Saved file on host: {target_path.name}"))
-        await self.send(message(HOST_STATUS, detail=f"File transfer complete."))
-        
-        if self.on_notification:
-            try:
-                self.on_notification("File Received", target_path.name)
-            except Exception as exc:
-                console.print(f"[yellow]Notification callback failed:[/yellow] {exc}")
+        try:
+            await asyncio.to_thread(target_path.write_bytes, content)
+            console.print(f"[green]File received:[/green] {target_path}")
+            await self.send(message(FILE_STATUS, ok=True, detail=f"Saved file on host: {target_path.name}"))
+            await self.send(message(HOST_STATUS, detail=f"File transfer complete."))
+
+            if self.on_notification:
+                try:
+                    self.on_notification("File Received", target_path.name)
+                except Exception as exc:
+                    console.print(f"[yellow]Notification callback failed:[/yellow] {exc}")
+        except Exception as exc:
+            console.print(f"[red]Failed to save file:[/red] {exc}")
+            await self.send(message(FILE_STATUS, ok=False, detail=f"Failed to save {filename} on host."))
 
     async def send(self, payload: dict[str, Any]) -> None:
         await self.ws.send(json.dumps(payload, separators=(",", ":")))
@@ -450,6 +504,59 @@ def read_server_url_config() -> str:
     return ""
 
 
+def resolve_http_url(server: str, download_url: str) -> str:
+    if download_url.startswith(("http://", "https://")):
+        return download_url
+
+    base_url = server.strip()
+    if base_url.endswith("/ws/host"):
+        base_url = base_url[: -len("/ws/host")]
+    elif base_url.endswith("/ws"):
+        base_url = base_url[: -len("/ws")]
+
+    if base_url.startswith("wss://"):
+        base_url = "https://" + base_url[len("wss://") :]
+    elif base_url.startswith("ws://"):
+        base_url = "http://" + base_url[len("ws://") :]
+
+    return urljoin(base_url.rstrip("/") + "/", download_url)
+
+
+def download_http_file(url: str, target_path: Path, max_bytes: int) -> int:
+    partial_path = target_path.with_name(f"{target_path.name}.part")
+    written = 0
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "SYMconnect Host Agent",
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=180) as response, partial_path.open("wb") as output:
+            content_length = int(response.headers.get("content-length") or 0)
+            if content_length > max_bytes:
+                raise ValueError("File is larger than the allowed limit.")
+
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > max_bytes:
+                    raise ValueError("File is larger than the allowed limit.")
+                output.write(chunk)
+
+        os.replace(partial_path, target_path)
+        return written
+    except urllib.error.URLError as exc:
+        partial_path.unlink(missing_ok=True)
+        raise RuntimeError(f"Could not download file: {exc}") from exc
+    except Exception:
+        partial_path.unlink(missing_ok=True)
+        raise
+
+
 def safe_filename(value: str) -> str:
     safe = "".join(ch for ch in value if ch.isalnum() or ch in " ._-").strip()
     return (safe or "symconnect-file")[:160]
@@ -486,45 +593,83 @@ def set_clipboard_text(text: str) -> None:
 
 def set_windows_clipboard_text(text: str) -> None:
     import ctypes
+    from ctypes import wintypes
 
     cf_unicode_text = 13
     gmem_moveable = 0x0002
-    user32 = ctypes.windll.user32
-    kernel32 = ctypes.windll.kernel32
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    user32.OpenClipboard.argtypes = [wintypes.HWND]
+    user32.OpenClipboard.restype = wintypes.BOOL
+    user32.EmptyClipboard.argtypes = []
+    user32.EmptyClipboard.restype = wintypes.BOOL
+    user32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
+    user32.SetClipboardData.restype = wintypes.HANDLE
+    user32.CloseClipboard.argtypes = []
+    user32.CloseClipboard.restype = wintypes.BOOL
+    kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+    kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
+    kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
+    kernel32.GlobalLock.restype = wintypes.LPVOID
+    kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+    kernel32.GlobalUnlock.restype = wintypes.BOOL
 
-    if not user32.OpenClipboard(None):
-        raise OSError("Could not open clipboard")
+    for attempt in range(10):
+        if user32.OpenClipboard(None):
+            break
+        if attempt == 9:
+            raise ctypes.WinError(ctypes.get_last_error())
+        time.sleep(0.05)
     try:
         if not user32.EmptyClipboard():
-            raise OSError("Could not empty clipboard")
+            raise ctypes.WinError(ctypes.get_last_error())
 
         buffer = ctypes.create_unicode_buffer(text)
         size = ctypes.sizeof(buffer)
         handle = kernel32.GlobalAlloc(gmem_moveable, size)
         if not handle:
-            raise OSError("Could not allocate clipboard memory")
+            raise ctypes.WinError(ctypes.get_last_error())
 
         locked = kernel32.GlobalLock(handle)
         if not locked:
-            raise OSError("Could not lock clipboard memory")
+            raise ctypes.WinError(ctypes.get_last_error())
         ctypes.memmove(locked, buffer, size)
         kernel32.GlobalUnlock(handle)
 
         if not user32.SetClipboardData(cf_unicode_text, handle):
-            raise OSError("Could not set clipboard data")
+            raise ctypes.WinError(ctypes.get_last_error())
     finally:
         user32.CloseClipboard()
 
+
 def get_windows_clipboard_text() -> str | None:
     import ctypes
-    user32 = ctypes.windll.user32
-    kernel32 = ctypes.windll.kernel32
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     cf_unicode_text = 13
+    user32.IsClipboardFormatAvailable.argtypes = [wintypes.UINT]
+    user32.IsClipboardFormatAvailable.restype = wintypes.BOOL
+    user32.OpenClipboard.argtypes = [wintypes.HWND]
+    user32.OpenClipboard.restype = wintypes.BOOL
+    user32.GetClipboardData.argtypes = [wintypes.UINT]
+    user32.GetClipboardData.restype = wintypes.HANDLE
+    user32.CloseClipboard.argtypes = []
+    user32.CloseClipboard.restype = wintypes.BOOL
+    kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
+    kernel32.GlobalLock.restype = wintypes.LPVOID
+    kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+    kernel32.GlobalUnlock.restype = wintypes.BOOL
 
     if not user32.IsClipboardFormatAvailable(cf_unicode_text):
         return None
 
-    if not user32.OpenClipboard(None):
+    for _ in range(10):
+        if user32.OpenClipboard(None):
+            break
+        time.sleep(0.05)
+    else:
         return None
     try:
         handle = user32.GetClipboardData(cf_unicode_text)
@@ -540,21 +685,34 @@ def get_windows_clipboard_text() -> str | None:
     finally:
         user32.CloseClipboard()
 
+
 def set_windows_clipboard_image(img_bytes: bytes) -> None:
     with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as f:
         f.write(img_bytes)
         f.flush()
         temp_path = f.name
-    
+
+    quoted_path = temp_path.replace("'", "''")
     cmd = [
-        "powershell", "-NoProfile", "-Command",
-        f"Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Clipboard]::SetImage([System.Drawing.Image]::FromFile('{temp_path}'))"
+        "powershell",
+        "-NoProfile",
+        "-STA",
+        "-Command",
+        (
+            "Add-Type -AssemblyName System.Windows.Forms; "
+            "Add-Type -AssemblyName System.Drawing; "
+            f"$image = [System.Drawing.Image]::FromFile('{quoted_path}'); "
+            "try { [System.Windows.Forms.Clipboard]::SetImage($image) } "
+            "finally { $image.Dispose() }"
+        ),
     ]
-    subprocess.run(cmd, creationflags=subprocess.CREATE_NO_WINDOW)
     try:
-        os.remove(temp_path)
-    except OSError:
-        pass
+        subprocess.run(cmd, creationflags=subprocess.CREATE_NO_WINDOW, check=True)
+    finally:
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
 
 if __name__ == "__main__":
     main()

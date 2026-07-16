@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import os
 import platform
+import shutil
 import sys
 import threading
 import time
+import tempfile
 from collections import deque
 from pathlib import Path
 from typing import Any
@@ -199,6 +201,19 @@ def build_ui_url(
     return f"{html_path.as_uri()}#{query}"
 
 
+def prepare_desktop_html(html_path: Path) -> Path:
+    target_dir = Path(tempfile.gettempdir()) / "symconnect-ui" / VERSION
+    shutil.copytree(html_path.parent, target_dir, dirs_exist_ok=True)
+
+    html = html_path.read_text(encoding="utf-8")
+    html = html.replace('href="/static/', 'href="')
+    html = html.replace('src="/static/', 'src="')
+
+    target_html = target_dir / "desktop_index.html"
+    target_html.write_text(html, encoding="utf-8")
+    return target_html
+
+
 def start_agent(session_id: str, pairing_code: str, server_url: str, api: Api) -> None:
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -258,6 +273,7 @@ def main() -> None:
     html_path = base_path / "symconnect" / "static" / "index.html"
     if not html_path.is_file():
         html_path = base_path / "static" / "index.html"
+    html_path = prepare_desktop_html(html_path)
 
     window = webview.create_window(
         f"SYMconnect v{VERSION}",

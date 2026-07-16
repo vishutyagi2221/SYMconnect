@@ -25,6 +25,7 @@ INPUT_KEY = "input:key"
 INPUT_RESET = "input:reset"
 
 CHAT_MESSAGE = "chat:message"
+FILE_AVAILABLE = "file:available"
 FILE_SEND = "file:send"
 FILE_STATUS = "file:status"
 

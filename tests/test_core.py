@@ -8,12 +8,13 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from pynput import keyboard, mouse
+from starlette.middleware.cors import CORSMiddleware
 import uvicorn
 import websockets
 
 from symconnect import __version__
 from symconnect.agent import HostAgent, PAIRING_ALPHABET, default_pairing_code, default_session_id
-from symconnect.desktop_app import Api, build_ui_url
+from symconnect.desktop_app import Api, build_ui_url, prepare_desktop_html
 from symconnect.input_control import InputController, KEY_ALIASES
 from symconnect.server import AUTH_ATTEMPT_LIMIT, AuthAttemptLimiter, app
 from symconnect.version import VERSION
@@ -89,6 +90,42 @@ def test_ui_url_contains_bridge_independent_bootstrap(tmp_path: Path) -> None:
     assert params["session_id"] == ["CV-A1B2C3D4"]
     assert params["pairing_code"] == ["ABCDEFGH"]
     assert params["server_url"] == ["wss://relay.example"]
+
+
+def test_prepare_desktop_html_uses_local_asset_paths(tmp_path: Path) -> None:
+    static_dir = tmp_path / "static"
+    static_dir.mkdir()
+    html_path = static_dir / "index.html"
+    html_path.write_text(
+        '<link rel="stylesheet" href="/static/styles.css?v=test" />'
+        '<img src="/static/logo.png" />'
+        '<script src="/static/app.js?v=test"></script>',
+        encoding="utf-8",
+    )
+    (static_dir / "styles.css").write_text("body {}", encoding="utf-8")
+    (static_dir / "logo.png").write_bytes(b"logo")
+    (static_dir / "app.js").write_text("console.log('ok')", encoding="utf-8")
+
+    desktop_html = prepare_desktop_html(html_path)
+    html = desktop_html.read_text(encoding="utf-8")
+
+    assert 'href="styles.css?v=test"' in html
+    assert 'src="logo.png"' in html
+    assert 'src="app.js?v=test"' in html
+    assert (desktop_html.parent / "styles.css").is_file()
+
+
+def test_file_upload_endpoint_allows_browser_preflight() -> None:
+    cors = next(
+        middleware
+        for middleware in app.user_middleware
+        if middleware.cls is CORSMiddleware
+    )
+
+    assert cors.kwargs["allow_origins"] == ["*"]
+    assert "OPTIONS" in cors.kwargs["allow_methods"]
+    assert "POST" in cors.kwargs["allow_methods"]
+    assert cors.kwargs["allow_headers"] == ["*"]
 
 
 def test_stream_waits_for_viewer() -> None:

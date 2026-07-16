@@ -14,9 +14,12 @@ const elements = {
   copyHostPassword: document.getElementById("copyHostPassword"),
 
   // Toolbar
+  floatingToolbar: document.getElementById("floatingToolbar"),
   requestControlButton: document.getElementById("requestControlButton"),
   releaseControlButton: document.getElementById("releaseControlButton"),
   disconnectButton: document.getElementById("disconnectButton"),
+  hideToolbarButton: document.getElementById("hideToolbarButton"),
+  showToolbarButton: document.getElementById("showToolbarButton"),
   chatButton: document.getElementById("chatButton"),
   fileButton: document.getElementById("fileButton"),
   clipboardButton: document.getElementById("clipboardButton"),
@@ -68,6 +71,10 @@ const state = {
   pressedButtons: new Set(),
   pressedKeys: new Map(),
   serverUrl: "",
+  sessionId: "",
+  pairingCode: "",
+  fileUploading: false,
+  toolbarHidden: false,
 };
 
 function bootstrapFromWindowLocation() {
@@ -128,6 +135,8 @@ elements.copyHostId.addEventListener("click", () => copyCredential("fakeId", "Se
 elements.copyHostPassword.addEventListener("click", () => copyCredential("fakePass", "Password copied"));
 
 elements.disconnectButton.addEventListener("click", () => disconnect());
+elements.hideToolbarButton.addEventListener("click", () => setToolbarHidden(true));
+elements.showToolbarButton.addEventListener("click", () => setToolbarHidden(false));
 
 // --- Toolbar Listeners ---
 elements.requestControlButton.addEventListener("click", () => {
@@ -199,7 +208,7 @@ function addChatMessage(sender, text) {
   elements.chatLog.scrollTop = elements.chatLog.scrollHeight;
 }
 
-elements.sendFileButton.addEventListener("click", () => {
+elements.sendFileButton.addEventListener("click", async () => {
   if (!state.controlAllowed) {
     setStatus("Control must be approved to send files.");
     return;
@@ -207,28 +216,85 @@ elements.sendFileButton.addEventListener("click", () => {
   const file = elements.fileInput.files[0];
   if (!file) return;
 
-  if (file.size > 8 * 1024 * 1024) {
-    setStatus("Error: File is too large. Maximum size is 8 MB.");
+  if (file.size > 100 * 1024 * 1024) {
+    setStatus("Error: File is too large. Maximum size is 100 MB.");
     elements.fileInput.value = "";
     return;
   }
 
-  setStatus(`Reading file ${file.name}...`);
-  const reader = new FileReader();
-  reader.onload = (e) => {
-    // Correctly split data URL to just get the base64 part
-    const base64 = e.target.result.split(',')[1];
-    send({
-      type: "file:send",
-      name: file.name,
-      data: base64
-    });
-    setStatus(`Sent file: ${file.name}`);
+  state.fileUploading = true;
+  renderConnectionState();
+  elements.sendFileButton.disabled = true;
+  elements.sendFileButton.textContent = "Uploading...";
+  setStatus(`Uploading ${file.name}...`);
+
+  try {
+    const result = await uploadFileToServer(file);
+    setStatus(result.detail || `Uploaded ${file.name}. Waiting for host download...`);
     toggleModal(elements.fileOverlay, false);
     elements.fileInput.value = "";
-  };
-  reader.readAsDataURL(file);
+  } catch (error) {
+    setStatus(error?.message || "File upload failed.");
+  } finally {
+    state.fileUploading = false;
+    elements.sendFileButton.disabled = false;
+    elements.sendFileButton.textContent = "Send";
+    renderConnectionState();
+  }
 });
+
+function uploadFileToServer(file) {
+  return new Promise((resolve, reject) => {
+    const baseUrl = resolveHttpBaseUrl();
+    if (!baseUrl) {
+      reject(new Error("Server URL is missing for file upload."));
+      return;
+    }
+    if (!state.sessionId || !state.pairingCode) {
+      reject(new Error("Session credentials are missing for file upload."));
+      return;
+    }
+
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `${baseUrl}/api/files`, true);
+    xhr.responseType = "json";
+    xhr.setRequestHeader("x-symconnect-session-id", state.sessionId);
+    xhr.setRequestHeader("x-symconnect-pairing-code", state.pairingCode);
+    xhr.setRequestHeader("x-symconnect-filename", encodeURIComponent(file.name));
+    xhr.setRequestHeader("x-symconnect-size", String(file.size));
+    xhr.setRequestHeader("x-symconnect-mime", file.type || "application/octet-stream");
+
+    xhr.upload.onprogress = (event) => {
+      if (!event.lengthComputable) return;
+      const percent = Math.max(1, Math.min(99, Math.round((event.loaded / event.total) * 100)));
+      setStatus(`Uploading ${file.name}... ${percent}%`);
+    };
+    xhr.onload = () => {
+      const data = xhr.response || parseMessage(xhr.responseText || "{}");
+      if (xhr.status >= 200 && xhr.status < 300 && data?.ok) {
+        resolve(data);
+      } else {
+        reject(new Error(data?.detail || `File upload failed (${xhr.status}).`));
+      }
+    };
+    xhr.onerror = () => reject(new Error("File upload failed because the network request failed."));
+    xhr.ontimeout = () => reject(new Error("File upload timed out."));
+    xhr.timeout = 5 * 60 * 1000;
+    xhr.send(file);
+  });
+}
+
+function resolveHttpBaseUrl() {
+  const configured = String(state.serverUrl || "").trim().replace(/\/+$/, "");
+  if (/^https?:\/\//i.test(configured)) return configured;
+  if (/^wss?:\/\//i.test(configured)) {
+    return configured.replace(/^ws/i, "http");
+  }
+  if (/^https?:$/i.test(window.location.protocol) && window.location.host) {
+    return window.location.origin;
+  }
+  return "";
+}
 
 elements.applyQualityButton.addEventListener("click", () => {
   const preset = elements.qualityPreset.value;
@@ -290,35 +356,39 @@ window.addEventListener("paste", async (e) => {
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
     if (item.type.startsWith("text/")) {
+      e.preventDefault();
       item.getAsString((text) => {
         send({ type: "clipboard:sync", format: "text", data: text });
         setStatus("Sending clipboard text...");
-        // Delay pasting by 300ms to allow host to set its clipboard
-        setTimeout(() => {
-          send({ type: "input:key", action: "down", key: "Control" });
-          send({ type: "input:key", action: "press", key: "v" });
-          send({ type: "input:key", action: "up", key: "Control" });
-        }, 300);
+        pasteRemoteClipboardAfterDelay(350);
       });
       return;
     } else if (item.type.startsWith("image/")) {
       const blob = item.getAsFile();
+      if (!blob) continue;
+      e.preventDefault();
       const reader = new FileReader();
       reader.onload = (event) => {
         const base64 = event.target.result.split(',')[1];
         send({ type: "clipboard:sync", format: "image", data: base64 });
         setStatus("Sending clipboard image...");
-        setTimeout(() => {
-          send({ type: "input:key", action: "down", key: "Control" });
-          send({ type: "input:key", action: "press", key: "v" });
-          send({ type: "input:key", action: "up", key: "Control" });
-        }, 500);
+        pasteRemoteClipboardAfterDelay(650);
       };
       reader.readAsDataURL(blob);
       return;
     }
   }
 });
+
+function pasteRemoteClipboardAfterDelay(delayMs) {
+  window.setTimeout(() => {
+    if (!state.controlAllowed) return;
+    send({ type: "input:key", action: "down", key: "Control", code: "ControlLeft" });
+    send({ type: "input:key", action: "press", key: "v", code: "KeyV" });
+    send({ type: "input:key", action: "up", key: "Control", code: "ControlLeft" });
+    setStatus("Remote paste command sent.");
+  }, delayMs);
+}
 
 // --- WebSocket Logic ---
 async function connect() {
@@ -327,6 +397,8 @@ async function connect() {
 
   const sessionId = elements.sessionId.value.trim();
   const pairingCode = elements.pairingCode.value.trim();
+  state.sessionId = sessionId;
+  state.pairingCode = pairingCode;
 
   let ws;
   try {
@@ -375,9 +447,13 @@ async function connect() {
     state.connected = false;
     state.controlAllowed = false;
     state.controlPending = false;
+    state.sessionId = "";
+    state.pairingCode = "";
+    state.fileUploading = false;
     state.ws = null;
     renderConnectionState();
     setStatus("Disconnected");
+    setToolbarHidden(false);
     if (!elements.connectError.textContent) setConnectError("Session disconnected.");
     switchScreen("home");
   });
@@ -398,7 +474,11 @@ function disconnect() {
   state.connected = false;
   state.controlAllowed = false;
   state.controlPending = false;
+  state.sessionId = "";
+  state.pairingCode = "";
+  state.fileUploading = false;
   renderConnectionState();
+  setToolbarHidden(false);
   switchScreen("home");
   elements.connectButton.disabled = false;
   elements.connectButton.textContent = "Join Session";
@@ -453,6 +533,9 @@ function handleMessage(data) {
       break;
     case "clipboard:sync":
       handleClipboardSync(data);
+      break;
+    case "file:status":
+      setStatus(data.detail || (data.ok ? "File transfer complete." : "File transfer failed."));
       break;
     case "server:error":
       setStatus(data.detail || "Server error");
@@ -641,9 +724,16 @@ function handleClipboardSync(data) {
   if (data.format === "text" && data.data) {
     navigator.clipboard.writeText(data.data)
       .then(() => setStatus("Clipboard text synced from Host"))
-      .catch((err) => console.error("Clipboard write error:", err));
+      .catch((err) => {
+        console.error("Clipboard write error:", err);
+        setStatus("Remote clipboard received, but browser denied clipboard write.");
+      });
   } else if (data.format === "image" && data.data) {
     try {
+      if (!window.ClipboardItem || !navigator.clipboard?.write) {
+        setStatus("Remote image clipboard received, but this browser cannot write images.");
+        return;
+      }
       const byteCharacters = atob(data.data);
       const byteNumbers = new Array(byteCharacters.length);
       for (let i = 0; i < byteCharacters.length; i++) {
@@ -654,11 +744,21 @@ function handleClipboardSync(data) {
       const item = new ClipboardItem({ "image/png": blob });
       navigator.clipboard.write([item])
         .then(() => setStatus("Clipboard image synced from Host"))
-        .catch((err) => console.error("Clipboard write error:", err));
+        .catch((err) => {
+          console.error("Clipboard write error:", err);
+          setStatus("Remote image clipboard received, but browser denied clipboard write.");
+        });
     } catch (err) {
       console.error("Failed to decode image from host", err);
+      setStatus("Remote image clipboard could not be decoded.");
     }
   }
+}
+
+function setToolbarHidden(hidden) {
+  state.toolbarHidden = Boolean(hidden);
+  elements.floatingToolbar.classList.toggle("toolbar-hidden", state.toolbarHidden);
+  elements.showToolbarButton.classList.toggle("hidden", !state.toolbarHidden);
 }
 
 function renderConnectionState() {
@@ -676,7 +776,7 @@ function renderConnectionState() {
     elements.badge.textContent = "Connected (View Only)";
   }
 
-  elements.fileButton.disabled = !state.controlAllowed;
+  elements.fileButton.disabled = !state.controlAllowed || state.fileUploading;
   elements.clipboardButton.disabled = !state.controlAllowed;
 }
 
